@@ -35,36 +35,33 @@ class GPVisualizer:
         self.r_load_transform = r_load_transform
         self.fill_min, self.fill_max = self.fill_transform.bounds
         self.r_min, self.r_max = self.r_load_transform.bounds
+        self.fig = None
+        self.ax_mean = None
+        self.ax_std = None
+        self._mean_cbar = None
+        self._std_cbar = None
+        plt.ion()
+
+    def _create_figure(self) -> None:
+        """Create a fresh figure with subplots for the GP surfaces."""
         self.fig = plt.figure(figsize=(14, 5))
         grid_spec = GridSpec(1, 2, figure=self.fig, wspace=0.3)
         self.ax_mean = self.fig.add_subplot(grid_spec[0], projection="3d")
         self.ax_std = self.fig.add_subplot(grid_spec[1], projection="3d")
-        self._ax_mean_pos = self.ax_mean.get_position().frozen()
-        self._ax_std_pos = self.ax_std.get_position().frozen()
         self._mean_cbar = None
         self._std_cbar = None
-        plt.ion()
-        plt.show()
 
     def update_plots(self, bo: BayesianOptimization, iteration: int):
         """Update all plots with current GP state."""
-        self.ax_mean.clear()
-        self.ax_std.clear()
-        # Restore original subplot size before adding new colorbars.
-        self.ax_mean.set_position(self._ax_mean_pos)
-        self.ax_std.set_position(self._ax_std_pos)
-        if self._mean_cbar is not None:
-            # Removing the axes directly avoids Matplotlib AttributeErrors when the colorbar has
-            # already been detached from the figure by the GUI backend.
-            mean_ax = getattr(self._mean_cbar, "ax", None)
-            if mean_ax is not None:
-                mean_ax.remove()
+        if self.fig is not None:
+            plt.close(self.fig)
+            self.fig = None
+            self.ax_mean = None
+            self.ax_std = None
             self._mean_cbar = None
-        if self._std_cbar is not None:
-            std_ax = getattr(self._std_cbar, "ax", None)
-            if std_ax is not None:
-                std_ax.remove()
             self._std_cbar = None
+
+        self._create_figure()
 
         # Get training data
         x_train = bo.x_train.cpu().numpy()
@@ -176,13 +173,16 @@ class GPVisualizer:
 
     def close(self):
         plt.ioff()
-        plt.close(self.fig)
+        if self.fig is not None:
+            plt.close(self.fig)
+            self.fig = None
 
     def process_events(self, delay: float = 0.05) -> None:
         """Allow Matplotlib to handle GUI events while long tasks execute."""
-        try:
-            self.fig.canvas.flush_events()
-        except Exception:
-            # Some backends do not implement flush_events; fall back to pause only.
-            pass
+        if self.fig is not None:
+            try:
+                self.fig.canvas.flush_events()
+            except Exception:
+                # Some backends do not implement flush_events; fall back to pause only.
+                pass
         plt.pause(max(0.001, float(delay)))

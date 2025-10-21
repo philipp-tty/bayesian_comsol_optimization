@@ -8,9 +8,10 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 
-from bo import BayesianOptimization, DEVICE, DTYPE
+from bo import DEVICE, DTYPE
 
 from .comsol_cli import COMSOLCLIOptimizer
+from .deterministic_bo import DeterministicBayesianOptimization
 from .visualization import GPVisualizer
 
 logger = logging.getLogger(__name__)
@@ -93,12 +94,13 @@ def optimize_thermoelectric_generator(
     logger.info("Phase 2: Bayesian Optimization (%s iterations)", n_iterations)
     logger.info("%s\n", "=" * 60)
 
-    bo = BayesianOptimization(
+    bo = DeterministicBayesianOptimization(
         x_train=x_init,
         y_train=y_init,
         bounds=bounds,
         maximize=True,
         use_outcome_transform=True,
+        measurement_noise=0.0,
     )
 
     # Initialize GP visualizer
