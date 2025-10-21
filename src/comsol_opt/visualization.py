@@ -49,10 +49,16 @@ class GPVisualizer:
         self.ax_mean.clear()
         self.ax_std.clear()
         if self._mean_cbar is not None:
-            self._mean_cbar.remove()
+            # Removing the axes directly avoids Matplotlib AttributeErrors when the colorbar has
+            # already been detached from the figure by the GUI backend.
+            mean_ax = getattr(self._mean_cbar, "ax", None)
+            if mean_ax is not None:
+                mean_ax.remove()
             self._mean_cbar = None
         if self._std_cbar is not None:
-            self._std_cbar.remove()
+            std_ax = getattr(self._std_cbar, "ax", None)
+            if std_ax is not None:
+                std_ax.remove()
             self._std_cbar = None
 
         # Get training data
