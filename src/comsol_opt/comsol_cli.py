@@ -8,8 +8,9 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, Tuple
+from typing import Callable, Dict, Mapping, Sequence, Tuple
 
+from .parameters import OptimizationParameter
 from .transforms import FillFactorTransform, LinearParameterTransform
 
 logger = logging.getLogger(__name__)
@@ -26,11 +27,10 @@ class COMSOLCLIOptimizer:
     def __init__(
         self,
         model_path: str,
+        parameters: Sequence[OptimizationParameter],
         n_legs: int = 127,
         comsol_exe_path: str | None = None,
         methodcall: str = "methodcall2",
-        fill_factor_bounds: Tuple[float, float] = (0.05, 0.40),
-        r_load_bounds: Tuple[float, float] = (0.0, 5.0),
         target_footprint_mm2: float | None = None,
     ):
         self.n_legs = int(n_legs)
@@ -48,15 +48,37 @@ class COMSOLCLIOptimizer:
             raise FileNotFoundError(f"COMSOL executable not found: {self.comsol_exe}")
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
+        if not parameters:
+            raise ValueError("Parameter specification list must not be empty.")
 
-        self.fill_transform = FillFactorTransform(fill_factor_bounds)
-        self.fill_factor_bounds = self.fill_transform.bounds
-        self.r_load_transform = LinearParameterTransform(r_load_bounds)
-        self.r_load_bounds = self.r_load_transform.bounds
+        self.parameters: list[OptimizationParameter] = list(parameters)
+        self._parameter_by_name: Dict[str, OptimizationParameter] = {}
+        self.parameter_transforms: Dict[str, LinearParameterTransform | FillFactorTransform] = {}
+        self.fill_parameter: OptimizationParameter | None = None
+        self.fill_transform: FillFactorTransform | None = None
 
-        if target_footprint_mm2 is None or target_footprint_mm2 <= 0:
-            raise ValueError("target_footprint_mm2 must be a positive number.")
-        self.target_footprint_mm2 = float(target_footprint_mm2)
+        for param in self.parameters:
+            if param.name in self._parameter_by_name:
+                raise ValueError(f"Duplicate parameter name provided: {param.name!r}.")
+            self._parameter_by_name[param.name] = param
+
+            if param.transform == "fill_factor":
+                if self.fill_parameter is not None:
+                    raise ValueError("Only one fill-factor parameter is supported.")
+                transform = FillFactorTransform(param.bounds)
+                self.fill_parameter = param
+                self.fill_transform = transform
+            else:
+                transform = LinearParameterTransform(param.bounds)
+
+            self.parameter_transforms[param.name] = transform
+
+        if self.fill_parameter is not None:
+            if target_footprint_mm2 is None or target_footprint_mm2 <= 0:
+                raise ValueError("target_footprint_mm2 must be a positive number when using fill-factor.")
+            self.target_footprint_mm2 = float(target_footprint_mm2)
+        else:
+            self.target_footprint_mm2 = None
 
         # GUI integration helpers (set later by optimizer/visualizer)
         self._event_pump: Callable[[], None] | None = None
@@ -66,21 +88,22 @@ class COMSOLCLIOptimizer:
         logger.info("Initialized COMSOL CLI wrapper with model: %s", self.model_path)
         logger.info("Using COMSOL executable: %s", self.comsol_exe)
         logger.info("Using COMSOL methodcall: %s", self.methodcall)
-        logger.info(
-            "Area fill factor bounds: %.1f%% to %.1f%%",
-            self.fill_factor_bounds[0] * 100.0,
-            self.fill_factor_bounds[1] * 100.0,
-        )
-        logger.info(
-            "Load resistance bounds: %.3f to %.3f",
-            self.r_load_bounds[0],
-            self.r_load_bounds[1],
-        )
-        logger.info(
-            "Target footprint (no casing): %.3f mm^2 (side %.3f mm)",
-            self.target_footprint_mm2,
-            math.sqrt(self.target_footprint_mm2),
-        )
+        for param in self.parameters:
+            bounds_str = f"{param.bounds[0]} to {param.bounds[1]}"
+            logger.info(
+                "Parameter '%s' (COMSOL: %s, unit: %s, transform: %s) bounds: %s",
+                param.name,
+                param.comsol_name,
+                param.unit or "-",
+                param.transform,
+                bounds_str,
+            )
+        if self.target_footprint_mm2 is not None:
+            logger.info(
+                "Target footprint (no casing): %.3f mm^2 (side %.3f mm)",
+                self.target_footprint_mm2,
+                math.sqrt(self.target_footprint_mm2),
+            )
 
     # ------------------------------------------------------------
     def calculate_geometry(self, fill_factor: float) -> Tuple[float, float]:
@@ -99,6 +122,9 @@ class COMSOLCLIOptimizer:
             leg_spacing = (L_total - A) / (n + 1)
             leg_width   = A / n
         """
+        if self.fill_transform is None or self.target_footprint_mm2 is None:
+            raise RuntimeError("Geometry calculations require a fill-factor parameter and target footprint.")
+
         f = float(self.fill_transform.clip_physical(fill_factor))
         if not (0.0 < f < 1.0):
             raise ValueError("fill_factor must be in (0, 1).")
@@ -124,6 +150,8 @@ class COMSOLCLIOptimizer:
     # ------------------------------------------------------------
     def geometry_from_fill_factor(self, fill_factor: float) -> Tuple[float, float]:
         """Return (leg_width, leg_spacing) for an area fill factor under the fixed footprint."""
+        if self.fill_transform is None:
+            raise RuntimeError("No fill-factor parameter configured for geometry calculation.")
         return self.calculate_geometry(fill_factor)
 
     # ------------------------------------------------------------
@@ -144,16 +172,26 @@ class COMSOLCLIOptimizer:
         return side_length * side_length
 
     # ------------------------------------------------------------
-    def _build_cmd(self, leg_width: float, leg_spacing: float, r_load: float) -> list[str]:
+    @staticmethod
+    def _format_value_for_cli(value: float, unit: str | None) -> str:
+        formatted_value = f"{value:.10g}"
+        if unit:
+            return f"{formatted_value}[{unit}]"
+        return formatted_value
+
+    def _build_cmd(self, parameter_names: Sequence[str], parameter_values: Sequence[str]) -> list[str]:
         """Build the COMSOL command line list."""
+        if len(parameter_names) != len(parameter_values):
+            raise ValueError("Parameter names and values must have the same length.")
+
         return [
             str(self.comsol_exe),
             "-inputfile",
             str(self.model_path),
             "-pname",
-            "leg_width,leg_spacing,R_l",
+            ",".join(parameter_names),
             "-plist",
-            f"{leg_width}[mm],{leg_spacing}[mm],{r_load}[ohm]",
+            ",".join(parameter_values),
             "-methodcall",
             self.methodcall,
             "-batchlog",
@@ -162,9 +200,9 @@ class COMSOLCLIOptimizer:
         ]
 
     # ------------------------------------------------------------
-    def run_comsol_cli(self, leg_width: float, leg_spacing: float, r_load: float) -> bool:
+    def run_comsol_cli(self, parameter_names: Sequence[str], parameter_values: Sequence[str]) -> bool:
         """Run COMSOL via CLI. COMSOL will create an output.txt file with results."""
-        cmd = self._build_cmd(leg_width, leg_spacing, r_load)
+        cmd = self._build_cmd(parameter_names, parameter_values)
         logger.info("Running command:\n  %s", " ".join(f'"{c}"' if " " in c else c for c in cmd))
 
         try:
@@ -285,15 +323,52 @@ class COMSOLCLIOptimizer:
             return -1e6
 
     # ------------------------------------------------------------
-    def evaluate(self, fill_factor: float, r_load: float) -> dict:
+    def evaluate(self, physical_parameters: Mapping[str, float]) -> dict:
         """
         Run COMSOL simulation and evaluate power output.
         COMSOL creates an output.txt file with the results.
         """
         output_file = "output.txt"
-        fill_factor = float(self.fill_transform.clip_physical(fill_factor))
-        r_load = float(self.r_load_transform.clip_physical(r_load))
-        leg_width, leg_spacing = self.geometry_from_fill_factor(fill_factor)
+        parameter_values: Dict[str, float] = {}
+        for param in self.parameters:
+            if param.name not in physical_parameters:
+                raise KeyError(f"Missing value for parameter '{param.name}'.")
+            transform = self.parameter_transforms[param.name]
+            parameter_values[param.name] = float(transform.clip_physical(physical_parameters[param.name]))
+
+        derived_parameters: Dict[str, float] = {}
+        comsol_names: list[str] = []
+        comsol_values: list[str] = []
+
+        if self.fill_parameter is not None:
+            fill_value = parameter_values[self.fill_parameter.name]
+            leg_width, leg_spacing = self.geometry_from_fill_factor(fill_value)
+            derived_parameters["leg_width"] = leg_width
+            derived_parameters["leg_spacing"] = leg_spacing
+            comsol_names.extend(["leg_width", "leg_spacing"])
+            comsol_values.extend(
+                [
+                    self._format_value_for_cli(leg_width, "mm"),
+                    self._format_value_for_cli(leg_spacing, "mm"),
+                ]
+            )
+
+        for param in self.parameters:
+            comsol_names.append(param.comsol_name)
+            comsol_values.append(
+                self._format_value_for_cli(parameter_values[param.name], param.unit)
+            )
+
+        comsol_parameter_payload: Dict[str, Dict[str, float | str | None]] = {}
+        if "leg_width" in derived_parameters:
+            comsol_parameter_payload["leg_width"] = {"value": derived_parameters["leg_width"], "unit": "mm"}
+        if "leg_spacing" in derived_parameters:
+            comsol_parameter_payload["leg_spacing"] = {"value": derived_parameters["leg_spacing"], "unit": "mm"}
+        for param in self.parameters:
+            comsol_parameter_payload[param.comsol_name] = {
+                "value": parameter_values[param.name],
+                "unit": param.unit,
+            }
 
         # Remove previous output file if it exists
         try:
@@ -303,25 +378,29 @@ class COMSOLCLIOptimizer:
 
         try:
             logger.info(
-                (
-                    "Evaluating: fill_factor(area)=%.4f, R_l=%.4f [ohm], leg_width=%.4f mm, "
-                    "leg_spacing=%.4f mm, footprint=%.3f mm^2"
+                "Evaluating COMSOL at parameters: %s",
+                ", ".join(
+                    f"{param.name}={parameter_values[param.name]:.6f}"
+                    for param in self.parameters
                 ),
-                fill_factor,
-                r_load,
-                leg_width,
-                leg_spacing,
-                self.footprint(leg_width, leg_spacing),
             )
-            success = self.run_comsol_cli(leg_width, leg_spacing, r_load)
+            if derived_parameters:
+                logger.info(
+                    "Derived geometry: leg_width=%.4f mm, leg_spacing=%.4f mm, footprint=%.3f mm^2",
+                    derived_parameters["leg_width"],
+                    derived_parameters["leg_spacing"],
+                    self.footprint(derived_parameters["leg_width"], derived_parameters["leg_spacing"])
+                    if self.target_footprint_mm2 is not None
+                    else float("nan"),
+                )
+            success = self.run_comsol_cli(comsol_names, comsol_values)
 
             if not success:
                 return {
                     "power": -1e6,
-                    "fill_factor": fill_factor,
-                    "r_load": r_load,
-                    "leg_width": leg_width,
-                    "leg_spacing": leg_spacing,
+                    "parameters": parameter_values,
+                    "derived_parameters": derived_parameters,
+                    "comsol_parameters": comsol_parameter_payload,
                     "success": False,
                 }
 
@@ -330,27 +409,19 @@ class COMSOLCLIOptimizer:
             if power_value == -1e6:
                 return {
                     "power": -1e6,
-                    "fill_factor": fill_factor,
-                    "r_load": r_load,
-                    "leg_width": leg_width,
-                    "leg_spacing": leg_spacing,
+                    "parameters": parameter_values,
+                    "derived_parameters": derived_parameters,
+                    "comsol_parameters": comsol_parameter_payload,
                     "success": False,
                 }
 
-            logger.info(
-                "Power output: %.6f mW, Fill factor(area): %.6f, R_l: %.4f [ohm], Leg spacing: %.6f mm",
-                power_value,
-                fill_factor,
-                r_load,
-                leg_spacing,
-            )
+            logger.info("Power output: %.6f mW", power_value)
 
             return {
                 "power": power_value,
-                "fill_factor": fill_factor,
-                "r_load": r_load,
-                "leg_width": leg_width,
-                "leg_spacing": leg_spacing,
+                "parameters": parameter_values,
+                "derived_parameters": derived_parameters,
+                "comsol_parameters": comsol_parameter_payload,
                 "success": power_value > 0,
             }
 
@@ -358,9 +429,8 @@ class COMSOLCLIOptimizer:
             logger.error("Simulation failed: %s", exc)
             return {
                 "power": -1e6,
-                "fill_factor": fill_factor,
-                "r_load": r_load,
-                "leg_width": leg_width,
-                "leg_spacing": leg_spacing,
+                "parameters": parameter_values,
+                "derived_parameters": derived_parameters,
+                "comsol_parameters": comsol_parameter_payload,
                 "success": False,
             }

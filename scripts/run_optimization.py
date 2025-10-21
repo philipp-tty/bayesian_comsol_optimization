@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from comsol_opt import optimize_thermoelectric_generator
+from comsol_opt import OptimizationParameter, optimize_thermoelectric_generator
 
 
 def main() -> None:
@@ -19,29 +19,55 @@ def main() -> None:
 
     COMSOL_EXE = r"C:\\Program Files\\COMSOL\\COMSOL63\\Multiphysics_NSL\\bin\\win64\\comsolbatch.exe"
 
+    PARAMETERS = [
+        OptimizationParameter(
+            name="fill_factor",
+            bounds=FILL_FACTOR_BOUNDS,
+            comsol_name="fill_factor",
+            transform="fill_factor",
+        ),
+        OptimizationParameter(
+            name="r_load",
+            bounds=R_LOAD_BOUNDS,
+            comsol_name="R_l",
+            unit="ohm",
+        ),
+    ]
+
     results = optimize_thermoelectric_generator(
         model_path=MODEL_PATH,
         n_legs=N_LEGS,
         n_initial=N_INITIAL,
         n_iterations=N_ITERATIONS,
-        fill_factor_bounds=FILL_FACTOR_BOUNDS,
-        r_load_bounds=R_LOAD_BOUNDS,
         random_seed=42,
         comsol_exe_path=COMSOL_EXE,
         methodcall="methodcall2",
         target_footprint_mm2=TARGET_FOOTPRINT_MM2,
+        parameters=PARAMETERS,
     )
 
     gp_training_data = {
         "scaled_parameters": results["scaled_parameters"].tolist(),
-        "fill_factors": results["all_fill_factors"].tolist(),
-        "r_loads": results["all_r_loads"].tolist(),
-        "power_observations": results["all_y"].reshape(-1).tolist(),
-        "scaled_bounds": [[0.0, 0.0], [1.0, 1.0]],
-        "physical_bounds": {
-            "fill_factor": list(FILL_FACTOR_BOUNDS),
-            "r_load": list(R_LOAD_BOUNDS),
+        "power_observations": results["power_history"].reshape(-1).tolist(),
+        "parameter_history": {
+            name: values.tolist() for name, values in results["parameter_history"].items()
         },
+        "derived_history": results["derived_history"],
+        "comsol_parameter_history": results["comsol_parameter_history"],
+        "scaled_bounds": [
+            [0.0 for _ in PARAMETERS],
+            [1.0 for _ in PARAMETERS],
+        ],
+        "parameter_definitions": [
+            {
+                "name": param.name,
+                "bounds": list(param.bounds),
+                "comsol_name": param.comsol_name,
+                "unit": param.unit,
+                "transform": param.transform,
+            }
+            for param in PARAMETERS
+        ],
         "random_seed": 42,
         "n_initial": N_INITIAL,
         "n_iterations": N_ITERATIONS,
@@ -51,11 +77,9 @@ def main() -> None:
     with results_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
-                "fill_factor": results["fill_factor"],
-                "r_load": results["r_load"],
-                "leg_width": results["leg_width"],
-                "leg_spacing": results["leg_spacing"],
-                "power": results["power"],
+                "power_mw": results["power"],
+                "parameters": results["parameters"],
+                "derived_parameters": results["derived_parameters"],
                 "gaussian_process": gp_training_data,
             },
             handle,
