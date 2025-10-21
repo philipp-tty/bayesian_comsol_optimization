@@ -91,11 +91,12 @@ class COMSOLCLIOptimizer:
         for param in self.parameters:
             bounds_str = f"{param.bounds[0]} to {param.bounds[1]}"
             logger.info(
-                "Parameter '%s' (COMSOL: %s, unit: %s, transform: %s) bounds: %s",
+                "Parameter '%s' (COMSOL: %s, unit: %s, transform: %s, type: %s) bounds: %s",
                 param.name,
                 param.comsol_name,
                 param.unit or "-",
                 param.transform,
+                param.value_type,
                 bounds_str,
             )
         if self.target_footprint_mm2 is not None:
@@ -334,7 +335,8 @@ class COMSOLCLIOptimizer:
             if param.name not in physical_parameters:
                 raise KeyError(f"Missing value for parameter '{param.name}'.")
             transform = self.parameter_transforms[param.name]
-            parameter_values[param.name] = float(transform.clip_physical(physical_parameters[param.name]))
+            clipped_value = float(transform.clip_physical(physical_parameters[param.name]))
+            parameter_values[param.name] = param.coerce_physical_value(clipped_value)
 
         derived_parameters: Dict[str, float] = {}
         comsol_names: list[str] = []

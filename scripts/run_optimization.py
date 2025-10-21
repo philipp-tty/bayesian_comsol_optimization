@@ -65,6 +65,7 @@ def main() -> None:
                 "comsol_name": param.comsol_name,
                 "unit": param.unit,
                 "transform": param.transform,
+                "value_type": param.value_type,
             }
             for param in PARAMETERS
         ],

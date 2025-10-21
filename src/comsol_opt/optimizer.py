@@ -93,15 +93,35 @@ def optimize_thermoelectric_generator(
         target_footprint_mm2=target_footprint_mm2,
     )
 
-    def scaled_to_physical(scaled_values: Iterable[float]) -> Dict[str, float]:
+    def project_scaled_values(scaled_values: Iterable[float]) -> tuple[Dict[str, float], List[float]]:
         physical: Dict[str, float] = {}
+        adjusted_scaled: List[float] = []
         for value, param in zip(scaled_values, parameters):
             transform = transforms[param.name]
-            physical[param.name] = float(transform.to_physical(float(value)))
+            scaled_float = float(value)
+            physical_value = float(transform.to_physical(scaled_float))
+            coerced_physical = param.coerce_physical_value(physical_value)
+            adjusted_scaled_value = float(transform.to_unit(coerced_physical))
+            adjusted_scaled_value = float(transform.ensure_unit(adjusted_scaled_value))
+            physical[param.name] = coerced_physical
+            adjusted_scaled.append(adjusted_scaled_value)
+        return physical, adjusted_scaled
+
+    def scaled_to_physical(scaled_values: Iterable[float]) -> Dict[str, float]:
+        physical, _ = project_scaled_values(scaled_values)
         return physical
 
     def tensor_row_to_list(row: torch.Tensor) -> List[float]:
         return [float(row[idx].item()) for idx in range(row.shape[-1])]
+
+    def format_parameter_value(param: OptimizationParameter, value: float) -> str:
+        if param.is_integer:
+            formatted_value = f"{int(value)}"
+        else:
+            formatted_value = f"{value:.6f}"
+        if param.unit:
+            return f"{param.name}={formatted_value} [{param.unit}]"
+        return f"{param.name}={formatted_value}"
 
     logger.info("\n%s", "=" * 60)
     logger.info("Phase 1: Initial random sampling (%s points)", n_initial)
@@ -117,10 +137,10 @@ def optimize_thermoelectric_generator(
 
     for i in range(n_initial):
         scaled_vector = [float(np.random.rand()) for _ in range(dimension)]
-        physical_params = scaled_to_physical(scaled_vector)
+        physical_params, adjusted_scaled = project_scaled_values(scaled_vector)
         result = comsol.evaluate(physical_params)
 
-        x_init[i] = torch.tensor(scaled_vector, device=DEVICE, dtype=DTYPE)
+        x_init[i] = torch.tensor(adjusted_scaled, device=DEVICE, dtype=DTYPE)
         y_init[i] = torch.tensor([result["power"]], device=DEVICE, dtype=DTYPE)
 
         for param in parameters:
@@ -134,9 +154,7 @@ def optimize_thermoelectric_generator(
             i + 1,
             n_initial,
             ", ".join(
-                f"{param.name}={physical_params[param.name]:.6f}"
-                + (f" [{param.unit}]" if param.unit else "")
-                for param in parameters
+                format_parameter_value(param, physical_params[param.name]) for param in parameters
             ),
             result["power"],
         )
@@ -173,11 +191,12 @@ def optimize_thermoelectric_generator(
         logger.info("\n--- BO Iteration %s/%s ---", iteration + 1, n_iterations)
         x_next = bo.get_next_data_points(q=1)
         scaled_values = tensor_row_to_list(x_next[0])
-        physical_params = scaled_to_physical(scaled_values)
+        physical_params, adjusted_scaled = project_scaled_values(scaled_values)
 
         result = comsol.evaluate(physical_params)
         y_next = torch.tensor([[result["power"]]], device=DEVICE, dtype=DTYPE)
-        bo.update_model(x_next, y_next)
+        x_next_projected = torch.tensor([adjusted_scaled], device=DEVICE, dtype=DTYPE)
+        bo.update_model(x_next_projected, y_next)
 
         for param in parameters:
             parameter_history[param.name].append(physical_params[param.name])
@@ -195,7 +214,7 @@ def optimize_thermoelectric_generator(
 
         logger.info("Current best: Power = %.6f mW", best_power)
         for param in parameters:
-            logger.info("  %s = %.6f%s", param.name, best_parameters[param.name], f" [{param.unit}]" if param.unit else "")
+            logger.info("  %s", format_parameter_value(param, best_parameters[param.name]))
         if comsol.fill_parameter is not None:
             fill_name = comsol.fill_parameter.name
             leg_width, leg_spacing = comsol.geometry_from_fill_factor(best_parameters[fill_name])
@@ -219,12 +238,7 @@ def optimize_thermoelectric_generator(
 
     logger.info("Optimal parameters:")
     for param in parameters:
-        logger.info(
-            "  %s = %.6f%s",
-            param.name,
-            best_parameters[param.name],
-            f" [{param.unit}]" if param.unit else "",
-        )
+        logger.info("  %s", format_parameter_value(param, best_parameters[param.name]))
     if best_derived:
         logger.info("  leg_width  = %.6f mm", best_derived["leg_width"])
         logger.info("  leg_spacing= %.6f mm", best_derived["leg_spacing"])

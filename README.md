@@ -17,3 +17,18 @@ a modular Python package for easier maintenance.
 
 Adjust the constants in `scripts/run_optimization.py` to point at your COMSOL installation and model.
 
+## Parameter Configuration
+
+Optimization variables are declared via `OptimizationParameter`. Continuous parameters are the default, but you can request integer handling by setting `value_type="integer"`. Integer parameters are rounded to the nearest in-bounds integer before each COMSOL evaluation.
+
+```python
+from comsol_opt import OptimizationParameter
+
+OptimizationParameter(
+    name="n_turns",
+    bounds=(8, 24),
+    comsol_name="coil_turns",
+    unit=None,
+    value_type="integer",
+)
+```
