@@ -39,6 +39,8 @@ class GPVisualizer:
         grid_spec = GridSpec(1, 2, figure=self.fig, wspace=0.3)
         self.ax_mean = self.fig.add_subplot(grid_spec[0], projection="3d")
         self.ax_std = self.fig.add_subplot(grid_spec[1], projection="3d")
+        self._ax_mean_pos = self.ax_mean.get_position().frozen()
+        self._ax_std_pos = self.ax_std.get_position().frozen()
         self._mean_cbar = None
         self._std_cbar = None
         plt.ion()
@@ -48,6 +50,9 @@ class GPVisualizer:
         """Update all plots with current GP state."""
         self.ax_mean.clear()
         self.ax_std.clear()
+        # Restore original subplot size before adding new colorbars.
+        self.ax_mean.set_position(self._ax_mean_pos)
+        self.ax_std.set_position(self._ax_std_pos)
         if self._mean_cbar is not None:
             # Removing the axes directly avoids Matplotlib AttributeErrors when the colorbar has
             # already been detached from the figure by the GUI backend.
