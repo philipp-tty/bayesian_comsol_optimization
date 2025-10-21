@@ -156,6 +156,8 @@ class COMSOLCLIOptimizer:
             f"{leg_width}[mm],{leg_spacing}[mm],{r_load}[ohm]",
             "-methodcall",
             self.methodcall,
+            "-batchlog",
+            "comsol_batch.log",
             "-nosave",
         ]
 
