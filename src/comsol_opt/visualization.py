@@ -16,6 +16,8 @@ from .transforms import FillFactorTransform, LinearParameterTransform
 
 logger = logging.getLogger(__name__)
 
+CI_Z_SCORE = 1.96  # Two-sided 95% confidence interval multiplier for Gaussian posterior
+
 
 class GPVisualizer:
     """
@@ -75,10 +77,12 @@ class GPVisualizer:
             mean = posterior.mean.cpu().numpy().reshape(n_grid, n_grid)
             variance = posterior.variance.cpu().numpy().reshape(n_grid, n_grid)
             std = np.sqrt(np.clip(variance, a_min=0.0, a_max=None))
+            ci_half_width = CI_Z_SCORE * std
             train_posterior = bo.model.posterior(bo.x_train, observation_noise=False)
             train_std = np.sqrt(
                 np.clip(train_posterior.variance.cpu().numpy().flatten(), a_min=0.0, a_max=None)
             )
+            train_ci_half_width = CI_Z_SCORE * train_std
 
         best_idx = y_train.argmax()
         best_fill = fill_factors_train[best_idx]
@@ -128,11 +132,11 @@ class GPVisualizer:
             mean_surface, ax=self.ax_mean, shrink=0.6, pad=0.1, label="Mean (mW)"
         )
 
-        # --- Plot 2: GP Standard Deviation surface ---
-        std_surface = self.ax_std.plot_surface(
+        # --- Plot 2: GP 95% confidence interval half-width ---
+        ci_surface = self.ax_std.plot_surface(
             fill_grid,
             r_grid,
-            std,
+            ci_half_width,
             cmap="plasma",
             alpha=0.85,
             linewidth=0,
@@ -140,7 +144,7 @@ class GPVisualizer:
         self.ax_std.scatter(
             fill_factors_train,
             r_loads_train,
-            train_std,
+            train_ci_half_width,
             c="black",
             s=20,
             alpha=0.8,
@@ -148,12 +152,12 @@ class GPVisualizer:
         )
         self.ax_std.set_xlabel("Fill Factor (area)")
         self.ax_std.set_ylabel("R_l [ohm]")
-        self.ax_std.set_zlabel("Std Dev (mW)")
-        self.ax_std.set_title("GP Standard Deviation Surface", fontsize=12, fontweight="bold")
+        self.ax_std.set_zlabel("95% CI Half-Width (mW)")
+        self.ax_std.set_title("GP 95% Confidence Interval Surface", fontsize=12, fontweight="bold")
         self.ax_std.view_init(elev=45, azim=-125)
         self.ax_std.legend(loc="upper left", fontsize=9)
         self._std_cbar = self.fig.colorbar(
-            std_surface, ax=self.ax_std, shrink=0.6, pad=0.1, label="Std Dev (mW)"
+            ci_surface, ax=self.ax_std, shrink=0.6, pad=0.1, label="95% CI Half-Width (mW)"
         )
 
         plt.draw()

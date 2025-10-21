@@ -14,7 +14,7 @@ def main() -> None:
     N_INITIAL = 4
     N_ITERATIONS = 16
     FILL_FACTOR_BOUNDS = (0.01, 0.40)  # area fraction no units
-    R_LOAD_BOUNDS = (0.0, 5.0)  # ohms
+    R_LOAD_BOUNDS = (1.0, 5.0)  # ohms
     TARGET_FOOTPRINT_MM2 = 400
 
     COMSOL_EXE = r"C:\\Program Files\\COMSOL\\COMSOL63\\Multiphysics_NSL\\bin\\win64\\comsolbatch.exe"
