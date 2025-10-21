@@ -78,3 +78,57 @@ class FillFactorTransform:
             return torch.clamp(scaled, 0.0, 1.0)
         return np.clip(scaled, 0.0, 1.0)
 
+
+class LinearParameterTransform:
+    """Generic affine transform between physical bounds and the unit interval."""
+
+    def __init__(self, bounds: Tuple[float, float]):
+        if len(bounds) != 2:
+            raise ValueError("bounds must be a tuple of length 2.")
+
+        param_min, param_max = map(float, bounds)
+        if not param_min < param_max:
+            raise ValueError("bounds must satisfy min < max.")
+
+        self._min = param_min
+        self._max = param_max
+        self._span = self._max - self._min
+
+    @property
+    def bounds(self) -> Tuple[float, float]:
+        return (self._min, self._max)
+
+    def to_physical(self, scaled: Union[float, Iterable[float], np.ndarray, torch.Tensor]):
+        if isinstance(scaled, torch.Tensor):
+            return self._min + self._span * scaled
+
+        scaled_arr = np.asarray(scaled, dtype=float)
+        physical = self._min + self._span * scaled_arr
+        if np.isscalar(scaled) or np.ndim(scaled_arr) == 0:
+            return float(physical)
+        return physical
+
+    def to_unit(self, value: Union[float, Iterable[float], np.ndarray, torch.Tensor]):
+        if isinstance(value, torch.Tensor):
+            return (value - self._min) / self._span
+
+        value_arr = np.asarray(value, dtype=float)
+        scaled = (value_arr - self._min) / self._span
+        if np.isscalar(value) or np.ndim(value_arr) == 0:
+            return float(scaled)
+        return scaled
+
+    def clip_physical(self, value: Union[float, Iterable[float], np.ndarray, torch.Tensor]):
+        if isinstance(value, torch.Tensor):
+            return torch.clamp(value, self._min, self._max)
+
+        clipped = np.clip(value, self._min, self._max)
+        clipped_arr = np.asarray(clipped, dtype=float)
+        if np.isscalar(value) or np.ndim(clipped_arr) == 0:
+            return float(clipped_arr)
+        return clipped_arr
+
+    def ensure_unit(self, scaled: Union[float, Iterable[float], np.ndarray, torch.Tensor]):
+        if isinstance(scaled, torch.Tensor):
+            return torch.clamp(scaled, 0.0, 1.0)
+        return np.clip(scaled, 0.0, 1.0)

@@ -6,7 +6,7 @@ import logging
 
 from .comsol_cli import COMSOLCLIOptimizer
 from .optimizer import optimize_thermoelectric_generator
-from .transforms import FillFactorTransform
+from .transforms import FillFactorTransform, LinearParameterTransform
 from .visualization import GPVisualizer
 
 # Configure a default logging setup if the host application has not done so.
@@ -17,7 +17,7 @@ if not _root_logger.handlers:
 __all__ = [
     "COMSOLCLIOptimizer",
     "FillFactorTransform",
+    "LinearParameterTransform",
     "GPVisualizer",
     "optimize_thermoelectric_generator",
 ]
-

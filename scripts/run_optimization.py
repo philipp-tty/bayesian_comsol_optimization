@@ -14,6 +14,7 @@ def main() -> None:
     N_INITIAL = 4
     N_ITERATIONS = 16
     FILL_FACTOR_BOUNDS = (0.01, 0.40)  # area fraction
+    R_LOAD_BOUNDS = (0.0, 5.0)  # ohms
     TARGET_FOOTPRINT_MM2 = 400
 
     COMSOL_EXE = r"C:\\Program Files\\COMSOL\\COMSOL63\\Multiphysics_NSL\\bin\\win64\\comsolbatch.exe"
@@ -24,6 +25,7 @@ def main() -> None:
         n_initial=N_INITIAL,
         n_iterations=N_ITERATIONS,
         fill_factor_bounds=FILL_FACTOR_BOUNDS,
+        r_load_bounds=R_LOAD_BOUNDS,
         random_seed=42,
         comsol_exe_path=COMSOL_EXE,
         methodcall="methodcall2",
@@ -35,6 +37,7 @@ def main() -> None:
         json.dump(
             {
                 "fill_factor": results["fill_factor"],
+                "r_load": results["r_load"],
                 "leg_width": results["leg_width"],
                 "leg_spacing": results["leg_spacing"],
                 "power": results["power"],
@@ -48,4 +51,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

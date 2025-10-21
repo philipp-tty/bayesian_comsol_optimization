@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Tuple
 
-from .transforms import FillFactorTransform
+from .transforms import FillFactorTransform, LinearParameterTransform
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ class COMSOLCLIOptimizer:
         comsol_exe_path: str | None = None,
         methodcall: str = "methodcall2",
         fill_factor_bounds: Tuple[float, float] = (0.05, 0.40),
+        r_load_bounds: Tuple[float, float] = (0.0, 5.0),
         target_footprint_mm2: float | None = None,
     ):
         self.n_legs = int(n_legs)
@@ -49,6 +50,8 @@ class COMSOLCLIOptimizer:
 
         self.fill_transform = FillFactorTransform(fill_factor_bounds)
         self.fill_factor_bounds = self.fill_transform.bounds
+        self.r_load_transform = LinearParameterTransform(r_load_bounds)
+        self.r_load_bounds = self.r_load_transform.bounds
 
         if target_footprint_mm2 is None or target_footprint_mm2 <= 0:
             raise ValueError("target_footprint_mm2 must be a positive number.")
@@ -61,6 +64,11 @@ class COMSOLCLIOptimizer:
             "Area fill factor bounds: %.1f%% to %.1f%%",
             self.fill_factor_bounds[0] * 100.0,
             self.fill_factor_bounds[1] * 100.0,
+        )
+        logger.info(
+            "Load resistance bounds: %.3f to %.3f",
+            self.r_load_bounds[0],
+            self.r_load_bounds[1],
         )
         logger.info(
             "Target footprint (no casing): %.3f mm^2 (side %.3f mm)",
@@ -130,25 +138,25 @@ class COMSOLCLIOptimizer:
         return side_length * side_length
 
     # ------------------------------------------------------------
-    def _build_cmd(self, leg_width: float, leg_spacing: float) -> list[str]:
+    def _build_cmd(self, leg_width: float, leg_spacing: float, r_load: float) -> list[str]:
         """Build the COMSOL command line list."""
         return [
             str(self.comsol_exe),
             "-inputfile",
             str(self.model_path),
             "-pname",
-            "leg_width,leg_spacing",
+            "leg_width,leg_spacing,R_l",
             "-plist",
-            f"{leg_width}[mm],{leg_spacing}[mm]",
+            f"{leg_width}[mm],{leg_spacing}[mm],{r_load}",
             "-methodcall",
             self.methodcall,
             "-nosave",
         ]
 
     # ------------------------------------------------------------
-    def run_comsol_cli(self, leg_width: float, leg_spacing: float) -> bool:
+    def run_comsol_cli(self, leg_width: float, leg_spacing: float, r_load: float) -> bool:
         """Run COMSOL via CLI. COMSOL will create an output.txt file with results."""
-        cmd = self._build_cmd(leg_width, leg_spacing)
+        cmd = self._build_cmd(leg_width, leg_spacing, r_load)
         logger.info("Running command:\n  %s", " ".join(f'"{c}"' if " " in c else c for c in cmd))
 
         try:
@@ -229,13 +237,14 @@ class COMSOLCLIOptimizer:
             return -1e6
 
     # ------------------------------------------------------------
-    def evaluate(self, fill_factor: float) -> dict:
+    def evaluate(self, fill_factor: float, r_load: float) -> dict:
         """
         Run COMSOL simulation and evaluate power output.
         COMSOL creates an output.txt file with the results.
         """
         output_file = "output.txt"
         fill_factor = float(self.fill_transform.clip_physical(fill_factor))
+        r_load = float(self.r_load_transform.clip_physical(r_load))
         leg_width, leg_spacing = self.geometry_from_fill_factor(fill_factor)
 
         # Remove previous output file if it exists
@@ -246,18 +255,23 @@ class COMSOLCLIOptimizer:
 
         try:
             logger.info(
-                "Evaluating: fill_factor(area)=%.4f, leg_width=%.4f mm, leg_spacing=%.4f mm, footprint=%.3f mm^2",
+                (
+                    "Evaluating: fill_factor(area)=%.4f, R_l=%.4f, leg_width=%.4f mm, "
+                    "leg_spacing=%.4f mm, footprint=%.3f mm^2"
+                ),
                 fill_factor,
+                r_load,
                 leg_width,
                 leg_spacing,
                 self.footprint(leg_width, leg_spacing),
             )
-            success = self.run_comsol_cli(leg_width, leg_spacing)
+            success = self.run_comsol_cli(leg_width, leg_spacing, r_load)
 
             if not success:
                 return {
                     "power": -1e6,
                     "fill_factor": fill_factor,
+                    "r_load": r_load,
                     "leg_width": leg_width,
                     "leg_spacing": leg_spacing,
                     "success": False,
@@ -269,21 +283,24 @@ class COMSOLCLIOptimizer:
                 return {
                     "power": -1e6,
                     "fill_factor": fill_factor,
+                    "r_load": r_load,
                     "leg_width": leg_width,
                     "leg_spacing": leg_spacing,
                     "success": False,
                 }
 
             logger.info(
-                "Power output: %.6f mW, Fill factor(area): %.6f, Leg spacing: %.6f mm",
+                "Power output: %.6f mW, Fill factor(area): %.6f, R_l: %.4f, Leg spacing: %.6f mm",
                 power_value,
                 fill_factor,
+                r_load,
                 leg_spacing,
             )
 
             return {
                 "power": power_value,
                 "fill_factor": fill_factor,
+                "r_load": r_load,
                 "leg_width": leg_width,
                 "leg_spacing": leg_spacing,
                 "success": power_value > 0,
@@ -294,8 +311,8 @@ class COMSOLCLIOptimizer:
             return {
                 "power": -1e6,
                 "fill_factor": fill_factor,
+                "r_load": r_load,
                 "leg_width": leg_width,
                 "leg_spacing": leg_spacing,
                 "success": False,
             }
-

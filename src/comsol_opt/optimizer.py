@@ -22,6 +22,7 @@ def optimize_thermoelectric_generator(
     n_initial: int = 10,
     n_iterations: int = 30,
     fill_factor_bounds: Tuple[float, float] = (0.05, 0.40),
+    r_load_bounds: Tuple[float, float] = (0.0, 5.0),
     random_seed: int = 42,
     comsol_exe_path: str | None = None,
     methodcall: str = "methodcall2",
@@ -46,12 +47,14 @@ def optimize_thermoelectric_generator(
         comsol_exe_path=comsol_exe_path,
         methodcall=methodcall,
         fill_factor_bounds=fill_factor_bounds,
+        r_load_bounds=r_load_bounds,
         target_footprint_mm2=target_footprint_mm2,
     )
     fill_transform = comsol.fill_transform
+    r_load_transform = comsol.r_load_transform
 
     bounds = torch.tensor(
-        [[0.0], [1.0]],
+        [[0.0, 0.0], [1.0, 1.0]],
         device=DEVICE,
         dtype=DTYPE,
     )
@@ -60,22 +63,28 @@ def optimize_thermoelectric_generator(
     logger.info("Phase 1: Initial random sampling (%s points)", n_initial)
     logger.info("%s\n", "=" * 60)
 
-    x_init = torch.empty((n_initial, 1), device=DEVICE, dtype=DTYPE)
+    x_init = torch.empty((n_initial, 2), device=DEVICE, dtype=DTYPE)
     y_init = torch.empty((n_initial, 1), device=DEVICE, dtype=DTYPE)
 
     for i in range(n_initial):
         scaled_fill = np.random.rand()
+        scaled_r_load = np.random.rand()
         fill_factor = float(fill_transform.to_physical(scaled_fill))
+        r_load = float(r_load_transform.to_physical(scaled_r_load))
 
-        result = comsol.evaluate(fill_factor)
-        x_init[i] = torch.tensor([scaled_fill], device=DEVICE, dtype=DTYPE)
+        result = comsol.evaluate(fill_factor, r_load)
+        x_init[i] = torch.tensor([scaled_fill, scaled_r_load], device=DEVICE, dtype=DTYPE)
         y_init[i] = torch.tensor([result["power"]], device=DEVICE, dtype=DTYPE)
 
         logger.info(
-            "Initial sample %s/%s: fill_factor(area)=%.6f, leg_spacing=%.6f mm, Power = %.6f mW\n",
+            (
+                "Initial sample %s/%s: fill_factor(area)=%.6f, R_l=%.6f, "
+                "leg_spacing=%.6f mm, Power = %.6f mW\n"
+            ),
             i + 1,
             n_initial,
             fill_factor,
+            r_load,
             result["leg_spacing"],
             result["power"],
         )
@@ -93,7 +102,7 @@ def optimize_thermoelectric_generator(
     )
 
     # Initialize GP visualizer
-    visualizer = GPVisualizer(comsol, fill_transform)
+    visualizer = GPVisualizer(comsol, fill_transform, r_load_transform)
 
     # Show initial GP state
     visualizer.update_plots(bo, iteration=0)
@@ -102,9 +111,11 @@ def optimize_thermoelectric_generator(
         logger.info("\n--- BO Iteration %s/%s ---", iteration + 1, n_iterations)
         x_next = bo.get_next_data_points(q=1)
         scaled_fill_next = float(x_next[0, 0].item())
+        scaled_r_load_next = float(x_next[0, 1].item())
         fill_factor_next = float(fill_transform.to_physical(scaled_fill_next))
+        r_load_next = float(r_load_transform.to_physical(scaled_r_load_next))
 
-        result = comsol.evaluate(fill_factor_next)
+        result = comsol.evaluate(fill_factor_next, r_load_next)
         y_next = torch.tensor([[result["power"]]], device=DEVICE, dtype=DTYPE)
         bo.update_model(x_next, y_next)
 
@@ -112,13 +123,16 @@ def optimize_thermoelectric_generator(
         visualizer.update_plots(bo, iteration=iteration + 1)
 
         best_idx = bo.y_train.argmax()
-        best_scaled = float(bo.x_train[best_idx].item())
-        best_fill_factor = float(fill_transform.to_physical(best_scaled))
+        best_scaled_fill = float(bo.x_train[best_idx, 0].item())
+        best_scaled_r = float(bo.x_train[best_idx, 1].item())
+        best_fill_factor = float(fill_transform.to_physical(best_scaled_fill))
+        best_r_load = float(r_load_transform.to_physical(best_scaled_r))
         best_y = bo.y_train[best_idx]
         best_leg_width, best_leg_spacing = comsol.geometry_from_fill_factor(best_fill_factor)
 
         logger.info("Current best: Power = %.6f mW", best_y.item())
         logger.info("  fill_factor(area) = %.6f", best_fill_factor)
+        logger.info("  R_l               = %.6f", best_r_load)
         logger.info("  leg_width         = %.4f mm", best_leg_width)
         logger.info("  leg_spacing       = %.6f mm\n", best_leg_spacing)
 
@@ -127,13 +141,16 @@ def optimize_thermoelectric_generator(
     logger.info("%s\n", "=" * 60)
 
     best_idx = bo.y_train.argmax()
-    best_scaled = float(bo.x_train[best_idx].item())
-    best_fill_factor = float(fill_transform.to_physical(best_scaled))
+    best_scaled_fill = float(bo.x_train[best_idx, 0].item())
+    best_scaled_r = float(bo.x_train[best_idx, 1].item())
+    best_fill_factor = float(fill_transform.to_physical(best_scaled_fill))
+    best_r_load = float(r_load_transform.to_physical(best_scaled_r))
     best_y = bo.y_train[best_idx]
     best_leg_width, best_leg_spacing = comsol.geometry_from_fill_factor(best_fill_factor)
 
     logger.info("Optimal parameters:")
     logger.info("  fill_factor(area) = %.6f", best_fill_factor)
+    logger.info("  R_l               = %.6f", best_r_load)
     logger.info("  leg_width         = %.6f mm", best_leg_width)
     logger.info("  leg_spacing       = %.6f mm", best_leg_spacing)
     logger.info("  Power output      = %.6f mW", best_y.item())
@@ -143,11 +160,12 @@ def optimize_thermoelectric_generator(
 
     return {
         "fill_factor": best_fill_factor,
+        "r_load": best_r_load,
         "leg_width": best_leg_width,
         "leg_spacing": best_leg_spacing,
         "power": float(best_y.item()),
         "scaled_parameters": bo.x_train.cpu().numpy(),
-        "all_fill_factors": fill_transform.to_physical(bo.x_train.cpu().numpy()),
+        "all_fill_factors": fill_transform.to_physical(bo.x_train[:, 0].cpu().numpy()),
+        "all_r_loads": r_load_transform.to_physical(bo.x_train[:, 1].cpu().numpy()),
         "all_y": bo.y_train.cpu().numpy(),
     }
-
