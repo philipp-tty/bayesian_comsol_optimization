@@ -83,7 +83,7 @@ class COMSOLCLIOptimizer:
         # GUI integration helpers (set later by optimizer/visualizer)
         self._event_pump: Callable[[], None] | None = None
         self._event_poll_interval = 0.05
-        self._cli_timeout = 300.0
+        self._cli_timeout = 2000.0
 
         logger.info("Initialized COMSOL CLI wrapper with model: %s", self.model_path)
         logger.info("Using COMSOL executable: %s", self.comsol_exe)

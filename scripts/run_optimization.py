@@ -11,8 +11,8 @@ from comsol_opt import OptimizationParameter, optimize_thermoelectric_generator
 def main() -> None:
     MODEL_PATH = "teg_no_electrodes.mph"
     N_LEGS = 8
-    N_INITIAL = 4
-    N_ITERATIONS = 16
+    N_INITIAL = 6
+    N_ITERATIONS = 24
     FILL_FACTOR_BOUNDS = (0.01, 0.40)  # area fraction no units
     R_LOAD_BOUNDS = (1.0, 5.0)  # ohms
     TARGET_FOOTPRINT_MM2 = 400
