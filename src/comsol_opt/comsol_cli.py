@@ -6,8 +6,9 @@ import logging
 import math
 import re
 import subprocess
+import time
 from pathlib import Path
-from typing import Tuple
+from typing import Callable, Tuple
 
 from .transforms import FillFactorTransform, LinearParameterTransform
 
@@ -56,6 +57,11 @@ class COMSOLCLIOptimizer:
         if target_footprint_mm2 is None or target_footprint_mm2 <= 0:
             raise ValueError("target_footprint_mm2 must be a positive number.")
         self.target_footprint_mm2 = float(target_footprint_mm2)
+
+        # GUI integration helpers (set later by optimizer/visualizer)
+        self._event_pump: Callable[[], None] | None = None
+        self._event_poll_interval = 0.05
+        self._cli_timeout = 300.0
 
         logger.info("Initialized COMSOL CLI wrapper with model: %s", self.model_path)
         logger.info("Using COMSOL executable: %s", self.comsol_exe)
@@ -147,7 +153,7 @@ class COMSOLCLIOptimizer:
             "-pname",
             "leg_width,leg_spacing,R_l",
             "-plist",
-            f"{leg_width}[mm],{leg_spacing}[mm],{r_load}",
+            f"{leg_width}[mm],{leg_spacing}[mm],{r_load}[ohm]",
             "-methodcall",
             self.methodcall,
             "-nosave",
@@ -160,17 +166,50 @@ class COMSOLCLIOptimizer:
         logger.info("Running command:\n  %s", " ".join(f'"{c}"' if " " in c else c for c in cmd))
 
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=300,
             )
 
-            if result.returncode != 0:
-                logger.error("COMSOL returned error code %s", result.returncode)
-                if result.stderr:
-                    logger.error("stderr: %s", result.stderr)
+            start_time = time.monotonic()
+            stdout_data = ""
+            stderr_data = ""
+
+            # Poll until completion, keeping the GUI responsive by pumping events.
+            while True:
+                poll_result = process.poll()
+                if poll_result is not None:
+                    stdout_chunk, stderr_chunk = process.communicate()
+                    stdout_data = stdout_chunk or ""
+                    stderr_data = stderr_chunk or ""
+                    break
+
+                if self._event_pump is not None:
+                    try:
+                        self._event_pump()
+                    except Exception:  # pragma: no cover - defensive guard
+                        logger.debug("Event pump callback raised", exc_info=True)
+                elif self._event_poll_interval > 0:
+                    time.sleep(self._event_poll_interval)
+
+                if time.monotonic() - start_time > self._cli_timeout:
+                    process.kill()
+                    stdout_chunk, stderr_chunk = process.communicate()
+                    stdout_data = stdout_chunk or ""
+                    stderr_data = stderr_chunk or ""
+                    raise subprocess.TimeoutExpired(
+                        cmd,
+                        self._cli_timeout,
+                        output=stdout_data,
+                        stderr=stderr_data,
+                    )
+
+            if process.returncode != 0:
+                logger.error("COMSOL returned error code %s", process.returncode)
+                if stderr_data:
+                    logger.error("stderr: %s", stderr_data)
                 return False
 
             # Check if COMSOL created the output.txt file
@@ -187,6 +226,13 @@ class COMSOLCLIOptimizer:
         except Exception as exc:
             logger.error("Error running COMSOL: %s", exc)
             return False
+
+    # ------------------------------------------------------------
+    def set_event_pump(self, pump: Callable[[], None] | None, poll_interval: float | None = None) -> None:
+        """Register a callback used to keep GUIs responsive while COMSOL runs."""
+        self._event_pump = pump
+        if poll_interval is not None:
+            self._event_poll_interval = max(0.0, float(poll_interval))
 
     # ------------------------------------------------------------
     def parse_power_output(self, output_file: str = "output.txt") -> float:
@@ -256,7 +302,7 @@ class COMSOLCLIOptimizer:
         try:
             logger.info(
                 (
-                    "Evaluating: fill_factor(area)=%.4f, R_l=%.4f, leg_width=%.4f mm, "
+                    "Evaluating: fill_factor(area)=%.4f, R_l=%.4f [ohm], leg_width=%.4f mm, "
                     "leg_spacing=%.4f mm, footprint=%.3f mm^2"
                 ),
                 fill_factor,
@@ -290,7 +336,7 @@ class COMSOLCLIOptimizer:
                 }
 
             logger.info(
-                "Power output: %.6f mW, Fill factor(area): %.6f, R_l: %.4f, Leg spacing: %.6f mm",
+                "Power output: %.6f mW, Fill factor(area): %.6f, R_l: %.4f [ohm], Leg spacing: %.6f mm",
                 power_value,
                 fill_factor,
                 r_load,

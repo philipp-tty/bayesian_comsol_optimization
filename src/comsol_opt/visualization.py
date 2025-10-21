@@ -119,7 +119,7 @@ class GPVisualizer:
             label="Best",
         )
         self.ax_mean.set_xlabel("Fill Factor (area)")
-        self.ax_mean.set_ylabel("R_l")
+        self.ax_mean.set_ylabel("R_l [ohm]")
         self.ax_mean.set_zlabel("Power Output (mW)")
         self.ax_mean.set_title(f"GP Mean Surface (Iter {iteration})", fontsize=12, fontweight="bold")
         self.ax_mean.legend(loc="upper left", fontsize=9)
@@ -147,7 +147,7 @@ class GPVisualizer:
             label="Observations",
         )
         self.ax_std.set_xlabel("Fill Factor (area)")
-        self.ax_std.set_ylabel("R_l")
+        self.ax_std.set_ylabel("R_l [ohm]")
         self.ax_std.set_zlabel("Std Dev (mW)")
         self.ax_std.set_title("GP Standard Deviation Surface", fontsize=12, fontweight="bold")
         self.ax_std.view_init(elev=45, azim=-125)
@@ -162,3 +162,12 @@ class GPVisualizer:
     def close(self):
         plt.ioff()
         plt.close(self.fig)
+
+    def process_events(self, delay: float = 0.05) -> None:
+        """Allow Matplotlib to handle GUI events while long tasks execute."""
+        try:
+            self.fig.canvas.flush_events()
+        except Exception:
+            # Some backends do not implement flush_events; fall back to pause only.
+            pass
+        plt.pause(max(0.001, float(delay)))

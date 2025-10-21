@@ -78,7 +78,7 @@ def optimize_thermoelectric_generator(
 
         logger.info(
             (
-                "Initial sample %s/%s: fill_factor(area)=%.6f, R_l=%.6f, "
+                "Initial sample %s/%s: fill_factor(area)=%.6f, R_l=%.6f [ohm], "
                 "leg_spacing=%.6f mm, Power = %.6f mW\n"
             ),
             i + 1,
@@ -103,6 +103,7 @@ def optimize_thermoelectric_generator(
 
     # Initialize GP visualizer
     visualizer = GPVisualizer(comsol, fill_transform, r_load_transform)
+    comsol.set_event_pump(lambda: visualizer.process_events(0.02), poll_interval=0.02)
 
     # Show initial GP state
     visualizer.update_plots(bo, iteration=0)
@@ -132,7 +133,7 @@ def optimize_thermoelectric_generator(
 
         logger.info("Current best: Power = %.6f mW", best_y.item())
         logger.info("  fill_factor(area) = %.6f", best_fill_factor)
-        logger.info("  R_l               = %.6f", best_r_load)
+        logger.info("  R_l               = %.6f [ohm]", best_r_load)
         logger.info("  leg_width         = %.4f mm", best_leg_width)
         logger.info("  leg_spacing       = %.6f mm\n", best_leg_spacing)
 
@@ -150,13 +151,14 @@ def optimize_thermoelectric_generator(
 
     logger.info("Optimal parameters:")
     logger.info("  fill_factor(area) = %.6f", best_fill_factor)
-    logger.info("  R_l               = %.6f", best_r_load)
+    logger.info("  R_l               = %.6f [ohm]", best_r_load)
     logger.info("  leg_width         = %.6f mm", best_leg_width)
     logger.info("  leg_spacing       = %.6f mm", best_leg_spacing)
     logger.info("  Power output      = %.6f mW", best_y.item())
 
     input("\nPress Enter to close plots and exit...")
     visualizer.close()
+    comsol.set_event_pump(None)
 
     return {
         "fill_factor": best_fill_factor,
