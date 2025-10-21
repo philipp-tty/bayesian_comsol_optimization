@@ -107,72 +107,6 @@ class COMSOLCLIOptimizer:
             )
 
     # ------------------------------------------------------------
-    def calculate_geometry(self, fill_factor: float) -> Tuple[float, float]:
-        """
-        Given an area fill factor f in (0, 1) and a fixed footprint area (mm^2),
-        compute the leg width and leg spacing (both in mm).
-
-        Definitions (no casing):
-            L_total = sqrt(target_footprint_mm2)
-            A = n * leg_width
-            f = (A^2) / (L_total^2)
-            L_total = A + (n + 1) * leg_spacing
-
-        Closed-form solution:
-            A  = sqrt(f) * L_total
-            leg_spacing = (L_total - A) / (n + 1)
-            leg_width   = A / n
-        """
-        if self.fill_transform is None or self.target_footprint_mm2 is None:
-            raise RuntimeError("Geometry calculations require a fill-factor parameter and target footprint.")
-
-        f = float(self.fill_transform.clip_physical(fill_factor))
-        if not (0.0 < f < 1.0):
-            raise ValueError("fill_factor must be in (0, 1).")
-
-        L_total = math.sqrt(self.target_footprint_mm2)
-        n = self.n_legs
-
-        A = math.sqrt(f) * L_total  # total leg length along one side
-        remaining = L_total - A
-        if remaining <= 0:
-            raise ValueError(
-                "Invalid geometry: legs exceed the total footprint side. Reduce fill_factor."
-            )
-
-        leg_spacing = remaining / (n + 1)
-        leg_width = A / n
-
-        if leg_width <= 0 or leg_spacing <= 0:
-            raise ValueError("Solved non-positive geometry; adjust inputs.")
-
-        return leg_width, leg_spacing
-
-    # ------------------------------------------------------------
-    def geometry_from_fill_factor(self, fill_factor: float) -> Tuple[float, float]:
-        """Return (leg_width, leg_spacing) for an area fill factor under the fixed footprint."""
-        if self.fill_transform is None:
-            raise RuntimeError("No fill-factor parameter configured for geometry calculation.")
-        return self.calculate_geometry(fill_factor)
-
-    # ------------------------------------------------------------
-    def footprint_side_length(self, leg_width: float, leg_spacing: float) -> float:
-        """
-        Return the total side length (mm) of the square module for a given geometry.
-
-        Formula (side length, no casing):
-            L = n * leg_width + (n + 1) * leg_spacing
-        """
-        n = self.n_legs
-        return n * leg_width + (n + 1) * leg_spacing
-
-    # ------------------------------------------------------------
-    def footprint(self, leg_width: float, leg_spacing: float) -> float:
-        """Return the footprint area (mm^2), no casing."""
-        side_length = self.footprint_side_length(leg_width, leg_spacing)
-        return side_length * side_length
-
-    # ------------------------------------------------------------
     @staticmethod
     def _format_value_for_cli(value: float, unit: str | None) -> str:
         formatted_value = f"{value:.10g}"
@@ -347,13 +281,6 @@ class COMSOLCLIOptimizer:
             leg_width, leg_spacing = self.geometry_from_fill_factor(fill_value)
             derived_parameters["leg_width"] = leg_width
             derived_parameters["leg_spacing"] = leg_spacing
-            comsol_names.extend(["leg_width", "leg_spacing"])
-            comsol_values.extend(
-                [
-                    self._format_value_for_cli(leg_width, "mm"),
-                    self._format_value_for_cli(leg_spacing, "mm"),
-                ]
-            )
 
         for param in self.parameters:
             comsol_names.append(param.comsol_name)
