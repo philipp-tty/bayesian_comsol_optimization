@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comsol-opt"
+version = "0.1.0"
+description = "CLI utilities for COMSOL-based thermoelectric generator optimization."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["black", "ruff"]
+
+[project.scripts]
+comsol-opt-run = "scripts.run_optimization:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
