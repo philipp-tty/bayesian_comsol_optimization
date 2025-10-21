@@ -276,12 +276,6 @@ class COMSOLCLIOptimizer:
         comsol_names: list[str] = []
         comsol_values: list[str] = []
 
-        if self.fill_parameter is not None:
-            fill_value = parameter_values[self.fill_parameter.name]
-            leg_width, leg_spacing = self.geometry_from_fill_factor(fill_value)
-            derived_parameters["leg_width"] = leg_width
-            derived_parameters["leg_spacing"] = leg_spacing
-
         for param in self.parameters:
             comsol_names.append(param.comsol_name)
             comsol_values.append(

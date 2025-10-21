@@ -215,11 +215,6 @@ def optimize_thermoelectric_generator(
         logger.info("Current best: Power = %.6f mW", best_power)
         for param in parameters:
             logger.info("  %s", format_parameter_value(param, best_parameters[param.name]))
-        if comsol.fill_parameter is not None:
-            fill_name = comsol.fill_parameter.name
-            leg_width, leg_spacing = comsol.geometry_from_fill_factor(best_parameters[fill_name])
-            logger.info("  leg_width  = %.6f mm", leg_width)
-            logger.info("  leg_spacing= %.6f mm", leg_spacing)
 
     logger.info("\n%s", "=" * 60)
     logger.info("OPTIMIZATION COMPLETE")
@@ -231,10 +226,6 @@ def optimize_thermoelectric_generator(
     best_power = float(bo.y_train[best_idx].item())
 
     best_derived: Dict[str, float] = {}
-    if comsol.fill_parameter is not None:
-        fill_name = comsol.fill_parameter.name
-        leg_width, leg_spacing = comsol.geometry_from_fill_factor(best_parameters[fill_name])
-        best_derived = {"leg_width": leg_width, "leg_spacing": leg_spacing}
 
     logger.info("Optimal parameters:")
     for param in parameters:
