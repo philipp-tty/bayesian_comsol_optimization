@@ -27,10 +27,11 @@ def main() -> None:
             transform="fill_factor",
         ),
         OptimizationParameter(
-            name="r_load",
-            bounds=R_LOAD_BOUNDS,
-            comsol_name="R_l",
-            unit="ohm",
+            name="n_legs",
+            comsol_name="n_legs",
+            bounds=(4, 20),
+            unit=None,
+            value_type="even_integer",
         ),
     ]
 

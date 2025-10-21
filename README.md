@@ -19,7 +19,7 @@ Adjust the constants in `scripts/run_optimization.py` to point at your COMSOL in
 
 ## Parameter Configuration
 
-Optimization variables are declared via `OptimizationParameter`. Continuous parameters are the default, but you can request integer handling by setting `value_type="integer"`. Integer parameters are rounded to the nearest in-bounds integer before each COMSOL evaluation.
+Optimization variables are declared via `OptimizationParameter`. Continuous parameters are the default, but you can request integral handling by setting `value_type` to `"integer"`, `"even_integer"`, or `"odd_integer"`. Integral parameters are rounded to the nearest in-bounds value that satisfies the requested parity before each COMSOL evaluation.
 
 ```python
 from comsol_opt import OptimizationParameter
@@ -29,6 +29,6 @@ OptimizationParameter(
     bounds=(8, 24),
     comsol_name="coil_turns",
     unit=None,
-    value_type="integer",
+    value_type="even_integer",
 )
 ```
