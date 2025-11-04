@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 from .comsol_cli import COMSOLCLIOptimizer
-from .optimizer import optimize_thermoelectric_generator
 from .parameters import OptimizationParameter
 from .transforms import FillFactorTransform, LinearParameterTransform
 from .visualization import GPVisualizer
@@ -21,5 +20,4 @@ __all__ = [
     "LinearParameterTransform",
     "GPVisualizer",
     "OptimizationParameter",
-    "optimize_thermoelectric_generator",
 ]

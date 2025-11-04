@@ -19,21 +19,16 @@ logger = logging.getLogger(__name__)
 class COMSOLCLIOptimizer:
     """
     Wrapper for COMSOL thermoelectric model optimization using the CLI.
-
-    It evaluates power output for a given area fill factor by deriving the corresponding
-    leg width and leg spacing from the target footprint area (without casing).
     """
 
     def __init__(
         self,
         model_path: str,
         parameters: Sequence[OptimizationParameter],
-        n_legs: int = 127,
         comsol_exe_path: str | None = None,
         methodcall: str = "methodcall2",
         target_footprint_mm2: float | None = None,
     ):
-        self.n_legs = int(n_legs)
         self.model_path = Path(model_path)
         self.methodcall = methodcall
 
@@ -272,7 +267,6 @@ class COMSOLCLIOptimizer:
             clipped_value = float(transform.clip_physical(physical_parameters[param.name]))
             parameter_values[param.name] = param.coerce_physical_value(clipped_value)
 
-        derived_parameters: Dict[str, float] = {}
         comsol_names: list[str] = []
         comsol_values: list[str] = []
 
@@ -283,10 +277,6 @@ class COMSOLCLIOptimizer:
             )
 
         comsol_parameter_payload: Dict[str, Dict[str, float | str | None]] = {}
-        if "leg_width" in derived_parameters:
-            comsol_parameter_payload["leg_width"] = {"value": derived_parameters["leg_width"], "unit": "mm"}
-        if "leg_spacing" in derived_parameters:
-            comsol_parameter_payload["leg_spacing"] = {"value": derived_parameters["leg_spacing"], "unit": "mm"}
         for param in self.parameters:
             comsol_parameter_payload[param.comsol_name] = {
                 "value": parameter_values[param.name],
@@ -307,22 +297,12 @@ class COMSOLCLIOptimizer:
                     for param in self.parameters
                 ),
             )
-            if derived_parameters:
-                logger.info(
-                    "Derived geometry: leg_width=%.4f mm, leg_spacing=%.4f mm, footprint=%.3f mm^2",
-                    derived_parameters["leg_width"],
-                    derived_parameters["leg_spacing"],
-                    self.footprint(derived_parameters["leg_width"], derived_parameters["leg_spacing"])
-                    if self.target_footprint_mm2 is not None
-                    else float("nan"),
-                )
             success = self.run_comsol_cli(comsol_names, comsol_values)
 
             if not success:
                 return {
                     "power": -1e6,
                     "parameters": parameter_values,
-                    "derived_parameters": derived_parameters,
                     "comsol_parameters": comsol_parameter_payload,
                     "success": False,
                 }
@@ -333,7 +313,6 @@ class COMSOLCLIOptimizer:
                 return {
                     "power": -1e6,
                     "parameters": parameter_values,
-                    "derived_parameters": derived_parameters,
                     "comsol_parameters": comsol_parameter_payload,
                     "success": False,
                 }
@@ -343,7 +322,6 @@ class COMSOLCLIOptimizer:
             return {
                 "power": power_value,
                 "parameters": parameter_values,
-                "derived_parameters": derived_parameters,
                 "comsol_parameters": comsol_parameter_payload,
                 "success": power_value > 0,
             }
@@ -353,7 +331,6 @@ class COMSOLCLIOptimizer:
             return {
                 "power": -1e6,
                 "parameters": parameter_values,
-                "derived_parameters": derived_parameters,
                 "comsol_parameters": comsol_parameter_payload,
                 "success": False,
             }

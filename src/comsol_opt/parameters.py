@@ -29,12 +29,6 @@ class OptimizationParameter:
         will pass values to COMSOL using this identifier.
     unit:
         Optional unit string appended in the COMSOL CLI call, e.g. ``"mm"``.
-    transform:
-        Which transform to use when mapping between the physical domain and
-        the normalized unit interval. ``"fill_factor"`` uses the specialized
-        :class:`~comsol_opt.transforms.FillFactorTransform`; ``"linear"``
-        applies a simple affine mapping via
-        :class:`~comsol_opt.transforms.LinearParameterTransform`.
     value_type:
         Indicates whether the physical parameter should be treated as
         ``"continuous"`` (default), as a general ``"integer"``, or restricted
@@ -47,7 +41,6 @@ class OptimizationParameter:
     bounds: Tuple[float, float]
     comsol_name: str
     unit: str | None = None
-    transform: TransformKind = "linear"
     value_type: ValueType = "continuous"
 
     def __post_init__(self) -> None:
@@ -56,19 +49,11 @@ class OptimizationParameter:
             raise ValueError(
                 f"Invalid bounds for parameter '{self.name}': lower must be < upper."
             )
-        if self.transform not in {"linear", "fill_factor"}:
-            raise ValueError(
-                f"Unsupported transform '{self.transform}' for parameter '{self.name}'."
-            )
         if self.value_type not in {"continuous", "integer", "even_integer", "odd_integer"}:
             raise ValueError(
                 f"Unsupported value_type '{self.value_type}' for parameter '{self.name}'."
             )
         if self.value_type in INTEGRAL_VALUE_TYPES:
-            if self.transform != "linear":
-                raise ValueError(
-                    f"Integer parameter '{self.name}' requires the 'linear' transform."
-                )
             lower_int, upper_int = self.integer_bounds
             if lower_int > upper_int:
                 raise ValueError(
