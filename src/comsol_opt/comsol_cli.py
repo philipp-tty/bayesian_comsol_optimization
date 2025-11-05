@@ -68,31 +68,35 @@ class COMSOLCLIOptimizer:
 
             self.parameter_transforms[param.name] = transform
 
-        if self.fill_parameter is not None:
-            if target_footprint_mm2 is None or target_footprint_mm2 <= 0:
-                raise ValueError("target_footprint_mm2 must be a positive number when using fill-factor.")
-            self.target_footprint_mm2 = float(target_footprint_mm2)
-        else:
-            self.target_footprint_mm2 = None
+        if target_footprint_mm2 is not None and target_footprint_mm2 <= 0:
+            raise ValueError("target_footprint_mm2 must be a positive number when provided.")
+
+        self.target_footprint_mm2 = (
+            float(target_footprint_mm2) if target_footprint_mm2 is not None else None
+        )
 
         # GUI integration helpers (set later by optimizer/visualizer)
         self._event_pump: Callable[[], None] | None = None
         self._event_poll_interval = 0.05
-        self._cli_timeout = 2000.0
+        self._cli_timeout = 6000.0
 
         logger.info("Initialized COMSOL CLI wrapper with model: %s", self.model_path)
         logger.info("Using COMSOL executable: %s", self.comsol_exe)
         logger.info("Using COMSOL methodcall: %s", self.methodcall)
         for param in self.parameters:
             bounds_str = f"{param.bounds[0]} to {param.bounds[1]}"
+            constant_suffix = (
+                f", constant={param.constant_value:.6g}" if param.is_constant else ""
+            )
             logger.info(
-                "Parameter '%s' (COMSOL: %s, unit: %s, transform: %s, type: %s) bounds: %s",
+                "Parameter '%s' (COMSOL: %s, unit: %s, transform: %s, type: %s) bounds: %s%s",
                 param.name,
                 param.comsol_name,
                 param.unit or "-",
                 param.transform,
                 param.value_type,
                 bounds_str,
+                constant_suffix,
             )
         if self.target_footprint_mm2 is not None:
             logger.info(
@@ -205,10 +209,13 @@ class COMSOLCLIOptimizer:
             self._event_poll_interval = max(0.0, float(poll_interval))
 
     # ------------------------------------------------------------
-    def parse_power_output(self, output_file: str = "output.txt") -> float:
+    def parse_output_value(self, output_file: str = "output.txt") -> float:
         """
-        Extract power output (mW) from COMSOL output.txt file.
-        Reads the last line that contains a float value.
+        Extract a scalar objective value from the COMSOL output file.
+
+        The default implementation searches ``output_file`` for the last floating
+        point literal and returns it as the optimization objective. Override this
+        method if the objective needs custom parsing logic.
         """
         try:
             output_path = Path(output_file)
@@ -228,7 +235,7 @@ class COMSOLCLIOptimizer:
                 match = re.search(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)", line)
                 if match:
                     power_value = float(match.group(1))
-                    logger.info("Found power value: %.10f mW", power_value)
+                    logger.info("Found objective value: %.10f", power_value)
                     break
 
             if power_value is None:
@@ -241,6 +248,16 @@ class COMSOLCLIOptimizer:
             logger.error("Error parsing output file: %s", exc)
             return -1e6
 
+    def parse_power_output(self, output_file: str = "output.txt") -> float:
+        """
+        Backwards-compatible alias for :meth:`parse_output_value`.
+
+        Historically, the optimization workflow maximized thermoelectric power.
+        The method name is retained for compatibility but simply delegates to the
+        generalized parser.
+        """
+        return self.parse_output_value(output_file)
+
     # ------------------------------------------------------------
     def evaluate(self, physical_parameters: Mapping[str, float]) -> dict:
         """
@@ -249,11 +266,18 @@ class COMSOLCLIOptimizer:
         """
         output_file = "output.txt"
         parameter_values: Dict[str, float] = {}
+
+        provided_parameters = dict(physical_parameters)
         for param in self.parameters:
-            if param.name not in physical_parameters:
-                raise KeyError(f"Missing value for parameter '{param.name}'.")
+            if param.name not in provided_parameters:
+                if param.is_constant and param.constant_value is not None:
+                    provided_parameters[param.name] = param.constant_value
+                else:
+                    raise KeyError(f"Missing value for parameter '{param.name}'.")
+
+        for param in self.parameters:
             transform = self.parameter_transforms[param.name]
-            clipped_value = float(transform.clip_physical(physical_parameters[param.name]))
+            clipped_value = float(transform.clip_physical(provided_parameters[param.name]))
             parameter_values[param.name] = param.coerce_physical_value(clipped_value)
 
         comsol_names: list[str] = []
@@ -296,28 +320,31 @@ class COMSOLCLIOptimizer:
                     "success": False,
                 }
 
-            power_value = self.parse_power_output(output_file)
+            objective_value = self.parse_output_value(output_file)
 
-            if power_value == -1e6:
+            if objective_value == -1e6:
                 return {
+                    "objective": -1e6,
                     "power": -1e6,
                     "parameters": parameter_values,
                     "comsol_parameters": comsol_parameter_payload,
                     "success": False,
                 }
 
-            logger.info("Power output: %.6f mW", power_value)
+            logger.info("Objective value: %.6f", objective_value)
 
             return {
-                "power": power_value,
+                "objective": objective_value,
+                "power": objective_value,
                 "parameters": parameter_values,
                 "comsol_parameters": comsol_parameter_payload,
-                "success": power_value > 0,
+                "success": True,
             }
 
         except Exception as exc:
             logger.error("Simulation failed: %s", exc)
             return {
+                "objective": -1e6,
                 "power": -1e6,
                 "parameters": parameter_values,
                 "comsol_parameters": comsol_parameter_payload,

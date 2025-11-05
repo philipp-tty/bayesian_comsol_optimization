@@ -8,6 +8,7 @@ from .comsol_cli import COMSOLCLIOptimizer
 from .parameters import OptimizationParameter
 from .transforms import FillFactorTransform, LinearParameterTransform
 from .visualization import GPVisualizer
+from .workflow import optimize_model
 
 # Configure a default logging setup if the host application has not done so.
 _root_logger = logging.getLogger()
@@ -20,4 +21,5 @@ __all__ = [
     "LinearParameterTransform",
     "GPVisualizer",
     "OptimizationParameter",
+    "optimize_model",
 ]

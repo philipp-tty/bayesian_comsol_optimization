@@ -30,5 +30,65 @@ OptimizationParameter(
     comsol_name="coil_turns",
     unit=None,
     value_type="even_integer",
+    transform="linear",
 )
+```
+
+Parameters that should remain fixed during the optimization can be declared with a `constant_value`. They will still be forwarded to COMSOL on every evaluation but are excluded from the search space.
+
+```python
+OptimizationParameter(
+    name="environment_temp",
+    bounds=(293.0, 293.0),
+    comsol_name="ambient_temp",
+    unit="K",
+    constant_value=293.0,
+)
+```
+
+## Example Optimization Loop
+
+Below is a minimal example that wires up two optimized parameters plus one constant and launches an optimization run. Adjust the COMSOL paths, parameter names, and bounds to match your model.
+
+```python
+from comsol_opt import OptimizationParameter, optimize_model
+
+MODEL_PATH = "path/to/your_model.mph"
+COMSOL_EXE = r"C:\Program Files\COMSOL\COMSOL63\Multiphysics\bin\win64\comsolbatch.exe"
+
+parameters = [
+    OptimizationParameter(
+        name="fill_factor",
+        bounds=(0.05, 0.35),
+        comsol_name="fill_factor",
+        transform="fill_factor",
+    ),
+    OptimizationParameter(
+        name="leg_count",
+        bounds=(6, 18),
+        comsol_name="n_legs",
+        value_type="even_integer",  # enforce even number of legs
+    ),
+    OptimizationParameter(
+        name="r_load",
+        bounds=(1.0, 5.0),
+        comsol_name="r_load",
+        unit="ohm",
+        constant_value=2.5,  # held fixed while still sent to COMSOL
+    ),
+]
+
+results = optimize_model(
+    model_path=MODEL_PATH,
+    n_initial=5,
+    n_iterations=20,
+    random_seed=123,
+    comsol_exe_path=COMSOL_EXE,
+    methodcall="methodcall2",
+    target_footprint_mm2=400,
+    parameters=parameters,
+)
+
+print(results["objective"])
+print(results["parameters"])
 ```

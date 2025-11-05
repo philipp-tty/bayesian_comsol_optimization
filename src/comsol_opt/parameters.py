@@ -42,6 +42,8 @@ class OptimizationParameter:
     comsol_name: str
     unit: str | None = None
     value_type: ValueType = "continuous"
+    transform: TransformKind = "linear"
+    constant_value: float | None = None
 
     def __post_init__(self) -> None:
         lower, upper = self.bounds
@@ -67,10 +69,32 @@ class OptimizationParameter:
                         f"Bounds for parameter '{self.name}' do not contain any "
                         f"{'even' if parity == 0 else 'odd'} integers."
                     )
+        if self.transform not in {"linear", "fill_factor"}:
+            raise ValueError(
+                f"Unsupported transform '{self.transform}' for parameter '{self.name}'."
+            )
+
+        if self.constant_value is not None:
+            constant = float(self.constant_value)
+            if constant < lower or constant > upper:
+                raise ValueError(
+                    f"Constant value {constant} for parameter '{self.name}' lies outside bounds {self.bounds}."
+                )
+            coerced = self.coerce_physical_value(constant)
+            if not math.isclose(coerced, constant, rel_tol=0.0, abs_tol=1e-9):
+                raise ValueError(
+                    f"Constant value {constant} for parameter '{self.name}' does not satisfy "
+                    f"its integer or parity constraints."
+                )
+            object.__setattr__(self, "constant_value", coerced)
 
     @property
     def is_integer(self) -> bool:
         return self.value_type in INTEGRAL_VALUE_TYPES
+
+    @property
+    def is_constant(self) -> bool:
+        return self.constant_value is not None
 
     @property
     def integer_bounds(self) -> Tuple[int, int]:

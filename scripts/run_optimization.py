@@ -5,17 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from comsol_opt import OptimizationParameter, optimize_thermoelectric_generator
+from comsol_opt import OptimizationParameter, optimize_model
 
 
 def main() -> None:
     MODEL_PATH = "teg_no_electrodes.mph"
-    N_LEGS = 8
     N_INITIAL = 6
     N_ITERATIONS = 24
     FILL_FACTOR_BOUNDS = (0.01, 0.40)  # area fraction no units
     R_LOAD_BOUNDS = (1.0, 5.0)  # ohms
-    TARGET_FOOTPRINT_MM2 = 400
 
     COMSOL_EXE = r"C:\\Program Files\\COMSOL\\COMSOL63\\Multiphysics_NSL\\bin\\win64\\comsolbatch.exe"
 
@@ -33,23 +31,31 @@ def main() -> None:
             unit=None,
             value_type="even_integer",
         ),
+        OptimizationParameter(
+            name="r_load",
+            bounds=R_LOAD_BOUNDS,
+            comsol_name="r_load",
+            unit="ohm",
+            constant_value=2.5,
+        ),
     ]
 
-    results = optimize_thermoelectric_generator(
+    results = optimize_model(
         model_path=MODEL_PATH,
-        n_legs=N_LEGS,
         n_initial=N_INITIAL,
         n_iterations=N_ITERATIONS,
         random_seed=42,
         comsol_exe_path=COMSOL_EXE,
         methodcall="methodcall2",
-        target_footprint_mm2=TARGET_FOOTPRINT_MM2,
         parameters=PARAMETERS,
     )
 
+    objective_values = results["objective_history"].reshape(-1).tolist()
+
     gp_training_data = {
         "scaled_parameters": results["scaled_parameters"].tolist(),
-        "power_observations": results["power_history"].reshape(-1).tolist(),
+        "objective_observations": objective_values,
+        "power_observations": objective_values,
         "parameter_history": {
             name: values.tolist() for name, values in results["parameter_history"].items()
         },
@@ -79,6 +85,7 @@ def main() -> None:
     with results_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
+                "objective_value": results["objective"],
                 "power_mw": results["power"],
                 "parameters": results["parameters"],
                 "derived_parameters": results["derived_parameters"],
