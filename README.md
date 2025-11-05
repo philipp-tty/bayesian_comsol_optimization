@@ -1,7 +1,7 @@
 # COMSOL Thermoelectric Optimization
 
 This project provides a small Python package and CLI entry point that wraps a COMSOL model
-with Bayesian optimization utilities. It started as a single script and has been refactored into
+with a scikit-optimize powered Bayesian optimization workflow. It started as a single script and has been refactored into
 a modular Python package for easier maintenance.
 
 ## Project Layout
@@ -85,7 +85,6 @@ results = optimize_model(
     random_seed=123,
     comsol_exe_path=COMSOL_EXE,
     methodcall="methodcall2",
-    target_footprint_mm2=400,
     parameters=parameters,
 )
 

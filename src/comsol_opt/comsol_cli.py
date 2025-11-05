@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import re
 import subprocess
 import time
@@ -22,12 +21,11 @@ class COMSOLCLIOptimizer:
     """
 
     def __init__(
-        self,
-        model_path: str,
-        parameters: Sequence[OptimizationParameter],
-        comsol_exe_path: str | None = None,
-        methodcall: str = "methodcall2",
-        target_footprint_mm2: float | None = None,
+            self,
+            model_path: str,
+            parameters: Sequence[OptimizationParameter],
+            comsol_exe_path: str | None = None,
+            methodcall: str = "methodcall2",
     ):
         self.model_path = Path(model_path)
         self.methodcall = methodcall
@@ -68,13 +66,6 @@ class COMSOLCLIOptimizer:
 
             self.parameter_transforms[param.name] = transform
 
-        if target_footprint_mm2 is not None and target_footprint_mm2 <= 0:
-            raise ValueError("target_footprint_mm2 must be a positive number when provided.")
-
-        self.target_footprint_mm2 = (
-            float(target_footprint_mm2) if target_footprint_mm2 is not None else None
-        )
-
         # GUI integration helpers (set later by optimizer/visualizer)
         self._event_pump: Callable[[], None] | None = None
         self._event_poll_interval = 0.05
@@ -97,12 +88,6 @@ class COMSOLCLIOptimizer:
                 param.value_type,
                 bounds_str,
                 constant_suffix,
-            )
-        if self.target_footprint_mm2 is not None:
-            logger.info(
-                "Target footprint (no casing): %.3f mm^2 (side %.3f mm)",
-                self.target_footprint_mm2,
-                math.sqrt(self.target_footprint_mm2),
             )
 
     # ------------------------------------------------------------

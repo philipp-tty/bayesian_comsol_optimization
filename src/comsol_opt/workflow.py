@@ -6,33 +6,15 @@ import logging
 from typing import Callable, Dict, Mapping, Sequence
 
 import numpy as np
+from skopt import Optimizer
+from skopt.space import Real
 
 from .comsol_cli import COMSOLCLIOptimizer
 from .parameters import OptimizationParameter
 
 logger = logging.getLogger(__name__)
 
-CandidateSampler = Callable[[np.random.Generator, int, np.ndarray | None, int], np.ndarray]
-
-
-def _default_candidate_sampler(
-    rng: np.random.Generator,
-    dimension: int,
-    best_scaled: np.ndarray | None,
-    iteration: int,
-) -> np.ndarray:
-    """
-    Default candidate sampler used by :func:`optimize_model`.
-
-    The sampler alternates between pure exploration (uniform samples in the unit
-    hypercube) and mild exploitation by perturbing the best known point.
-    """
-    if best_scaled is None or iteration < 1 or rng.random() < 0.5:
-        return rng.random(dimension)
-
-    noise = rng.normal(scale=0.1, size=dimension)
-    candidate = best_scaled + noise
-    return np.clip(candidate, 0.0, 1.0)
+FAILED_EVALUATION_PENALTY = 1e12
 
 
 def optimize_model(
@@ -45,8 +27,6 @@ def optimize_model(
     random_seed: int | None = None,
     maximize: bool = True,
     methodcall: str = "methodcall2",
-    target_footprint_mm2: float | None = None,
-    candidate_sampler: CandidateSampler | None = None,
     event_pump: Callable[[], None] | None = None,
     event_poll_interval: float | None = None,
 ) -> Dict[str, object]:
@@ -64,24 +44,18 @@ def optimize_model(
     comsol_exe_path:
         Absolute path to the COMSOL ``comsolbatch`` executable.
     n_initial:
-        Number of purely exploratory evaluations sampled uniformly in the unit cube.
+        Number of purely exploratory evaluations drawn from a random design prior to
+        fitting the Gaussian Process surrogate.
     n_iterations:
-        Number of additional evaluations after the initial design. The default
-        candidate sampler perturbs the incumbent solution with Gaussian noise while
-        continuing to explore uniformly.
+        Number of additional evaluations after the initial design guided by Expected
+        Improvement.
     random_seed:
-        Optional random seed forwarded to the NumPy random generator used for sampling.
+        Optional random seed forwarded to the optimizer backend for reproducibility.
     maximize:
         Whether the objective read from the COMSOL output should be maximized. Set to
         ``False`` to perform minimization.
     methodcall:
         COMSOL methodcall string passed through to :class:`COMSOLCLIOptimizer`.
-    target_footprint_mm2:
-        Optional footprint value required when using a fill-factor parameter transform.
-    candidate_sampler:
-        Optional sampler that proposes the next point in the unit hypercube. The callable
-        receives the NumPy ``Generator`` instance, the problem dimension, the best point in
-        the unit space (if one is known), and the zero-based iteration index.
     event_pump:
         Optional callback invoked periodically to keep GUIs responsive while COMSOL runs.
     event_poll_interval:
@@ -118,13 +92,11 @@ def optimize_model(
         parameters=parameters,
         comsol_exe_path=comsol_exe_path,
         methodcall=methodcall,
-        target_footprint_mm2=target_footprint_mm2,
     )
 
     if event_pump is not None or event_poll_interval is not None:
         optimizer.set_event_pump(event_pump, event_poll_interval)
 
-    rng = np.random.default_rng(random_seed)
     parameters = list(parameters)
     active_parameters = [param for param in parameters if not param.is_constant]
     active_indices = [index for index, param in enumerate(parameters) if not param.is_constant]
@@ -133,7 +105,6 @@ def optimize_model(
     }
 
     dimension = len(active_parameters)
-    sampler = candidate_sampler or _default_candidate_sampler
 
     scaled_history = np.zeros((total_evaluations, len(parameters)), dtype=float)
     objective_history = np.full(total_evaluations, np.nan, dtype=float)
@@ -148,17 +119,32 @@ def optimize_model(
     best_index = -1
     best_value = -np.inf if maximize else np.inf
     best_parameters: Dict[str, float] | None = None
-    best_scaled_active: np.ndarray | None = None
     best_comsol_parameters: Mapping[str, Mapping[str, float | str | None]] | None = None
 
-    for iteration in range(total_evaluations):
-        if iteration < n_initial:
-            scaled_candidate_active = rng.random(dimension) if dimension else np.empty(0)
-        else:
-            scaled_candidate_active = sampler(rng, dimension, best_scaled_active, iteration)
+    skopt_optimizer: Optimizer | None = None
+    if dimension > 0:
+        search_space = [Real(0.0, 1.0, name=param.name) for param in active_parameters]
+        initial_points = max(1, n_initial)
+        skopt_optimizer = Optimizer(
+            dimensions=search_space,
+            base_estimator="GP",
+            acq_func="EI",
+            initial_point_generator="random",
+            n_initial_points=initial_points,
+            random_state=random_seed,
+        )
 
-        scaled_candidate_active = np.asarray(scaled_candidate_active, dtype=float).reshape(dimension)
-        scaled_candidate_active = np.clip(scaled_candidate_active, 0.0, 1.0)
+    for iteration in range(total_evaluations):
+        if dimension:
+            if skopt_optimizer is not None:
+                scaled_candidate_active = np.asarray(
+                    skopt_optimizer.ask(), dtype=float
+                ).reshape(dimension)
+            else:
+                scaled_candidate_active = np.empty(0, dtype=float)
+            scaled_candidate_active = np.clip(scaled_candidate_active, 0.0, 1.0)
+        else:
+            scaled_candidate_active = np.empty(0, dtype=float)
 
         physical_guess: Dict[str, float] = {name: float(value) for name, value in constant_defaults.items()}
         for axis, param in enumerate(active_parameters):
@@ -205,7 +191,6 @@ def optimize_model(
             best_index = iteration
             best_value = objective_value
             best_parameters = actual_params
-            best_scaled_active = current_scaled_active.copy()
             best_comsol_parameters = comsol_payload
             continue
 
@@ -214,8 +199,14 @@ def optimize_model(
             best_index = iteration
             best_value = objective_value
             best_parameters = actual_params
-            best_scaled_active = current_scaled_active.copy()
             best_comsol_parameters = comsol_payload
+
+        if dimension and skopt_optimizer is not None:
+            if not success or not np.isfinite(objective_value):
+                surrogate_value = FAILED_EVALUATION_PENALTY
+            else:
+                surrogate_value = -objective_value if maximize else objective_value
+            skopt_optimizer.tell(current_scaled_active.tolist(), surrogate_value)
 
     if best_parameters is None:
         # No successful evaluations recorded; provide fallbacks.
