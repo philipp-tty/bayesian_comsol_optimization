@@ -208,7 +208,7 @@ class COMSOLCLIOptimizer:
     def parse_power_output(self, output_file: str = "output.txt") -> float:
         """
         Extract power output (mW) from COMSOL output.txt file.
-        Looks for the last numeric value after the "% realdot(cir.R1.i,cir.R1.v) (mW)" header.
+        Reads the last line that contains a float value.
         """
         try:
             output_path = Path(output_file)
@@ -219,31 +219,20 @@ class COMSOLCLIOptimizer:
             with open(output_path, "r", encoding="utf-8", errors="ignore") as handle:
                 lines = handle.readlines()
 
-            # Find the line containing the power output header
-            header_idx = -1
-            for i, line in enumerate(lines):
-                if "realdot(cir.R1.i" in line and "(mW)" in line:
-                    header_idx = i
-                    logger.info("Found power output header at line %s", i)
-                    break
-
-            if header_idx == -1:
-                logger.error("Could not find power output header in file")
-                return -1e6
-
-            # Look for the last numeric value after the header
+            # Look for the last line containing a float value
             power_value = None
-            for i in range(header_idx + 1, min(header_idx + 11, len(lines))):
-                line = lines[i].strip()
+            for line in reversed(lines):
+                line = line.strip()
                 if not line:
                     continue
                 match = re.search(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)", line)
                 if match:
                     power_value = float(match.group(1))
-                    logger.info("Found power value at line %s: %.10f mW", i, power_value)
+                    logger.info("Found power value: %.10f mW", power_value)
+                    break
 
             if power_value is None:
-                logger.error("Could not find numeric power value after header")
+                logger.error("Could not find numeric value in output file")
                 return -1e6
 
             return power_value
