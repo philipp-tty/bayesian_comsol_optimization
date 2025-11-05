@@ -10,43 +10,53 @@ from comsol_opt import OptimizationParameter, optimize_model
 
 def main() -> None:
     MODEL_PATH = "teg_no_electrodes.mph"
-    N_INITIAL = 6
-    N_ITERATIONS = 24
-    FILL_FACTOR_BOUNDS = (0.01, 0.40)  # area fraction no units
-    R_LOAD_BOUNDS = (1.0, 5.0)  # ohms
+    N_INITIAL = 10
+    N_ITERATIONS = 40
+    RANDOM_SEED = 42
 
     COMSOL_EXE = r"C:\\Program Files\\COMSOL\\COMSOL63\\Multiphysics_NSL\\bin\\win64\\comsolbatch.exe"
 
     PARAMETERS = [
         OptimizationParameter(
-            name="fill_factor",
-            bounds=FILL_FACTOR_BOUNDS,
-            comsol_name="fill_factor",
-            transform="fill_factor",
-        ),
-        OptimizationParameter(
             name="n_legs",
+            bounds=(4, 12),
             comsol_name="n_legs",
-            bounds=(4, 20),
-            unit=None,
             value_type="even_integer",
         ),
         OptimizationParameter(
+            name="leg_spacing",
+            bounds=(0.5, 2.0),
+            comsol_name="leg_spacing",
+            unit="mm",
+        ),
+        OptimizationParameter(
+            name="leg_width",
+            bounds=(0.5, 2.0),
+            comsol_name="leg_width",
+            unit="mm",
+        ),
+        OptimizationParameter(
+            name="leg_length",
+            bounds=(0.5, 4.0),
+            comsol_name="leg_length",
+            unit="mm",
+        ),
+        OptimizationParameter(
             name="r_load",
-            bounds=R_LOAD_BOUNDS,
+            bounds=(0.5, 10.0),
             comsol_name="r_load",
             unit="ohm",
-            constant_value=2.5,
         ),
     ]
 
     results = optimize_model(
         model_path=MODEL_PATH,
-        n_initial=N_INITIAL,
-        n_iterations=N_ITERATIONS,
-        random_seed=42,
         comsol_exe_path=COMSOL_EXE,
         methodcall="methodcall2",
+        n_initial=N_INITIAL,
+        n_iterations=N_ITERATIONS,
+        random_seed=RANDOM_SEED,
+        maximize=True,
         parameters=PARAMETERS,
     )
 
@@ -61,10 +71,7 @@ def main() -> None:
         },
         "derived_history": results["derived_history"],
         "comsol_parameter_history": results["comsol_parameter_history"],
-        "scaled_bounds": [
-            [0.0 for _ in PARAMETERS],
-            [1.0 for _ in PARAMETERS],
-        ],
+        "scaled_bounds": [[0.0 for _ in PARAMETERS], [1.0 for _ in PARAMETERS]],
         "parameter_definitions": [
             {
                 "name": param.name,
@@ -76,7 +83,7 @@ def main() -> None:
             }
             for param in PARAMETERS
         ],
-        "random_seed": 42,
+        "random_seed": RANDOM_SEED,
         "n_initial": N_INITIAL,
         "n_iterations": N_ITERATIONS,
     }
