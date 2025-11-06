@@ -13,7 +13,11 @@ from .workflow import optimize_model
 # Configure a default logging setup if the host application has not done so.
 _root_logger = logging.getLogger()
 if not _root_logger.handlers:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 __all__ = [
     "COMSOLCLIOptimizer",

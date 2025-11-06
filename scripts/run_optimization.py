@@ -2,13 +2,39 @@
 
 from __future__ import annotations
 
-import json
+import argparse
+import math
 from pathlib import Path
 
 from comsol_opt import OptimizationParameter, optimize_model
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the COMSOL-based Bayesian optimization workflow.")
+    parser.add_argument(
+        "--results-path",
+        type=Path,
+        default=None,
+        help="Path to store incremental optimization results (defaults to optimization_results.json).",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="Resume optimization from a previously saved results JSON file.",
+    )
+    parser.add_argument(
+        "--autosave-interval",
+        type=int,
+        default=1,
+        help="Number of evaluations between progress snapshots (default: 1).",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
+
     MODEL_PATH = "teg_no_electrodes.mph"
     N_INITIAL = 10
     N_ITERATIONS = 40
@@ -49,6 +75,12 @@ def main() -> None:
         ),
     ]
 
+    results_path = args.results_path or args.resume_from or Path("optimization_results.json")
+    autosave_interval = max(1, args.autosave_interval)
+
+    if args.resume_from:
+        print(f"Resuming optimization from '{args.resume_from}'.")
+
     results = optimize_model(
         model_path=MODEL_PATH,
         comsol_exe_path=COMSOL_EXE,
@@ -58,51 +90,23 @@ def main() -> None:
         random_seed=RANDOM_SEED,
         maximize=True,
         parameters=PARAMETERS,
+        results_path=results_path,
+        resume_path=args.resume_from,
+        autosave_interval=autosave_interval,
     )
 
-    objective_values = results["objective_history"].reshape(-1).tolist()
+    objective_value = float(results["objective"])
+    best_parameters = results["best_parameters"]
 
-    gp_training_data = {
-        "scaled_parameters": results["scaled_parameters"].tolist(),
-        "objective_observations": objective_values,
-        "power_observations": objective_values,
-        "parameter_history": {
-            name: values.tolist() for name, values in results["parameter_history"].items()
-        },
-        "derived_history": results["derived_history"],
-        "comsol_parameter_history": results["comsol_parameter_history"],
-        "scaled_bounds": [[0.0 for _ in PARAMETERS], [1.0 for _ in PARAMETERS]],
-        "parameter_definitions": [
-            {
-                "name": param.name,
-                "bounds": list(param.bounds),
-                "comsol_name": param.comsol_name,
-                "unit": param.unit,
-                "transform": param.transform,
-                "value_type": param.value_type,
-            }
-            for param in PARAMETERS
-        ],
-        "random_seed": RANDOM_SEED,
-        "n_initial": N_INITIAL,
-        "n_iterations": N_ITERATIONS,
-    }
+    print("\nOptimization completed.")
+    if math.isnan(objective_value):
+        print("No valid objective value was obtained.")
+    else:
+        print(f"Best objective value: {objective_value:.6g}")
+        for name, value in best_parameters.items():
+            print(f"  {name}: {float(value):.6g}")
 
-    results_path = Path("optimization_results.json")
-    with results_path.open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "objective_value": results["objective"],
-                "power_mw": results["power"],
-                "parameters": results["parameters"],
-                "derived_parameters": results["derived_parameters"],
-                "gaussian_process": gp_training_data,
-            },
-            handle,
-            indent=2,
-        )
-
-    print(f"\nResults saved to '{results_path}'")
+    print(f"\nProgress snapshots saved to '{results_path}'.")
 
 
 if __name__ == "__main__":

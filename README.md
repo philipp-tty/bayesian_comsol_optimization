@@ -13,9 +13,26 @@ a modular Python package for easier maintenance.
 
 1. Install the package in editable mode: `pip install -e .`
 2. Run the optimization either via `python -m scripts.run_optimization` or the console script
-   `comsol-opt-run`.
+   `comsol-opt-run`. The CLI accepts `--results-path`, `--resume-from`, and `--autosave-interval`
+   flags so runs can emit incremental snapshots and later continue from the same parametrization.
 
 Adjust the constants in `scripts/run_optimization.py` to point at your COMSOL installation and model.
+
+### Incremental Results & Resuming
+
+- `optimize_model` can persist its state after each evaluation by passing `results_path` (and
+  optionally `autosave_interval`). The snapshots include all histories plus GP training payloads.
+- Supply `resume_path` to continue an interrupted run; the optimizer validates that the parameter
+  configuration matches before resuming and automatically replays completed evaluations so the
+  surrogate model stays in sync.
+- The CLI exposes these features via the flags mentioned above. For example:
+  ```bash
+  python -m scripts.run_optimization --results-path runs/run01.json --autosave-interval 2
+  # later
+  python -m scripts.run_optimization --resume-from runs/run01.json
+  ```
+- Logging now includes timestamps and per-iteration progress with elapsed time and ETA, so long
+  optimizations are easier to monitor.
 
 ## Parameter Configuration
 
