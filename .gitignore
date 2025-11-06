@@ -142,3 +142,8 @@ build/
 # Private/secret files
 secrets.json
 credentials.json
+
+# Analysis artifacts
+analysis/
+
+optimization_results.json
