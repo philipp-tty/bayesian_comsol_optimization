@@ -90,6 +90,9 @@ def _extract_gp_dataset(results: dict) -> tuple[np.ndarray, np.ndarray, list[dic
     scaled = np.asarray(gp_data.get("scaled_parameters", []), dtype=float)
     objectives = np.asarray(gp_data.get("objective_observations", []), dtype=float)
 
+    # Always work with a flat 1D array of objectives
+    objectives = np.ravel(objectives)
+
     min_len = min(len(scaled), len(objectives))
     scaled = scaled[:min_len]
     objectives = objectives[:min_len]
@@ -129,6 +132,8 @@ def _filter_outliers(
         "total": total,
         "retained": total,
         "removed": 0,
+        "removed_indices": [],
+        "removed_values": [],
     }
 
     if method == "none" or total < 3:
@@ -170,6 +175,8 @@ def _filter_outliers(
     filtered_objectives = objectives[mask]
     stats["removed"] = int(total - filtered_objectives.size)
     stats["retained"] = int(filtered_objectives.size)
+    stats["removed_indices"] = np.where(~mask)[0].tolist()
+    stats["removed_values"] = objectives[~mask].tolist()
     return filtered_scaled, filtered_objectives, stats
 
 
@@ -191,7 +198,7 @@ def _determine_best_parameters(
     scaled_samples: np.ndarray,
     objectives: np.ndarray,
 ) -> tuple[dict[str, float], np.ndarray]:
-    best_physical = {}
+    best_physical: dict[str, float] = {}
 
     params_section = results.get("parameters") or results.get("best_parameters")
     if isinstance(params_section, dict) and params_section:
@@ -222,6 +229,13 @@ def _fit_gaussian_process(x: np.ndarray, y: np.ndarray) -> GaussianProcessRegres
     if x.shape[0] < 2:
         raise ValueError("At least two successful evaluations are required to fit the GP.")
 
+    x = np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+
+    # Enforce 1D targets
+    y = np.asarray(y, dtype=float).ravel()
+
     length_scale = np.full(x.shape[1], 0.5, dtype=float)
     kernel = ConstantKernel(1.0, (1e-2, 1e2)) * Matern(
         length_scale=length_scale,
@@ -241,6 +255,18 @@ def _fit_gaussian_process(x: np.ndarray, y: np.ndarray) -> GaussianProcessRegres
     return gp
 
 
+def _gp_predict_with_std(
+    gp: GaussianProcessRegressor, evaluation_points: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute GP mean/std using sklearn's implementation (handles normalization correctly)."""
+    if not hasattr(gp, "X_train_"):
+        raise ValueError("GaussianProcessRegressor must be fitted before requesting predictions.")
+
+    evaluation_points = np.atleast_2d(np.asarray(evaluation_points, dtype=float))
+    mean, std = gp.predict(evaluation_points, return_std=True)
+    return mean, std
+
+
 def _plot_parameter_slice(
     *,
     gp: GaussianProcessRegressor,
@@ -257,19 +283,18 @@ def _plot_parameter_slice(
     evaluation_points = np.tile(best_unit, (grid_points, 1))
     evaluation_points[:, param_index] = grid
 
-    mean, std = gp.predict(evaluation_points, return_std=True)
+    mean, std = _gp_predict_with_std(gp, evaluation_points)
     ci = ci_multiplier * std
     physical_grid = _to_physical(grid, param_def["bounds"])
     observations = _to_physical(scaled_samples[:, param_index], param_def["bounds"])
     best_physical = _to_physical(np.array([best_unit[param_index]]), param_def["bounds"])[0]
 
     fig, ax = plt.subplots(figsize=(7.0, 4.0))
-    ax.plot(physical_grid, mean, color="#1f77b4", linewidth=2.0, label="GP mean")
+    ax.plot(physical_grid, mean, linewidth=2.0, label="GP mean")
     ax.fill_between(
         physical_grid,
         mean - ci,
         mean + ci,
-        color="#1f77b4",
         alpha=0.25,
         label=f"+/- {ci_multiplier:.2f} sigma band",
     )
@@ -277,13 +302,12 @@ def _plot_parameter_slice(
         observations,
         objectives,
         s=25,
-        color="#444444",
         edgecolors="white",
         linewidths=0.4,
         alpha=0.85,
         label="Evaluations",
     )
-    ax.axvline(best_physical, color="#d62728", linestyle="--", linewidth=1.5, label="Best parameter")
+    ax.axvline(best_physical, linestyle="--", linewidth=1.5, label="Best parameter")
 
     unit = param_def.get("unit")
     label = param_def["name"] if not unit else f"{param_def['name']} [{unit}]"
@@ -330,21 +354,30 @@ def main() -> None:
     if outlier_stats["removed"]:
         print(
             f"Filtered {outlier_stats['removed']} outlier(s) using '{outlier_stats['method']}' "
-            f"(threshold={outlier_stats['threshold']})."
+            f"(threshold={outlier_stats['threshold']}):"
         )
+        for idx, value in zip(outlier_stats["removed_indices"], outlier_stats["removed_values"]):
+            print(f"  - Point {idx}: objective = {value:.6g}")
 
-    best_physical, best_unit = _determine_best_parameters(results, parameter_definitions, scaled_samples, objectives)
+    best_physical, best_unit = _determine_best_parameters(
+        results, parameter_definitions, scaled_samples, objectives
+    )
+
+    # Robust handling of best objective from results
+    raw_best_objective = results.get("objective_value", None)
+    try:
+        best_objective = float(raw_best_objective)
+    except (TypeError, ValueError):
+        best_objective = float(np.max(objectives))
 
     summary = {
         "results_path": str(args.results_path),
         "num_evaluations_raw": int(outlier_stats["total"]),
         "num_filtered_outliers": int(outlier_stats["removed"]),
         "num_evaluations": int(objectives.size),
-        "objective_mean": float(np.mean(objectives)),
-        "objective_std": float(np.std(objectives, ddof=1)) if objectives.size > 1 else 0.0,
         "objective_min": float(np.min(objectives)),
         "objective_max": float(np.max(objectives)),
-        "best_objective": float(results.get("objective_value", np.max(objectives))),
+        "best_objective": best_objective,
         "best_parameters": best_physical,
         "outlier_filter": outlier_stats,
     }
@@ -354,13 +387,17 @@ def main() -> None:
 
     print(f"Loaded {summary['num_evaluations_raw']} evaluations from '{args.results_path}'.")
     if outlier_stats["removed"]:
-        print(f"{summary['num_evaluations']} evaluations retained after outlier filtering.")
+        print(
+            f"{summary['num_evaluations']} evaluations retained after filtering "
+            f"{summary['num_filtered_outliers']} outlier(s)."
+        )
     print(f"Best objective: {summary['best_objective']:.6g}")
     print("Best parameters:")
     for name, value in best_physical.items():
         print(f"  - {name}: {value:.6g}")
     print(f"Summary saved to '{summary_path}'.")
 
+    # GP fitting and plotting
     gp = _fit_gaussian_process(scaled_samples, objectives)
     plot_paths: list[Path] = []
     for index, definition in enumerate(parameter_definitions):
