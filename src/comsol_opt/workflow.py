@@ -137,7 +137,9 @@ def optimize_model(
         Optional random seed forwarded to the optimizer backend for reproducibility.
     maximize:
         Whether the objective read from the COMSOL output should be maximized. Set to
-        ``False`` to perform minimization.
+        ``False`` to perform minimization. When maximizing, negative objective values are
+        treated as invalid datapoints and ignored to keep the search moving toward
+        better regions.
     methodcall:
         COMSOL methodcall string passed through to :class:`COMSOLCLIOptimizer`.
     event_pump:
@@ -458,8 +460,7 @@ def optimize_model(
             physical_value = transform.to_physical(scaled_candidate_active[axis])
             physical_guess[param.name] = float(physical_value)
 
-        evaluation = optimizer.evaluate(physical_guess)
-        evaluation_records.append(evaluation)
+        evaluation = dict(optimizer.evaluate(physical_guess))
 
         objective_value_raw = evaluation.get("objective")
         if objective_value_raw is None:
@@ -487,17 +488,28 @@ def optimize_model(
         comsol_payload = evaluation.get("comsol_parameters", {})
         comsol_history.append(comsol_payload)
         success = bool(evaluation.get("success", True))
+        disregard_negative = maximize and math.isfinite(objective_value) and objective_value < 0.0
+        if disregard_negative:
+            success = False
+            evaluation["disregarded_negative_objective"] = True
+            logger.info(
+                "Ignoring objective %.6g at iteration %d because it is negative during maximization.",
+                objective_value,
+                iteration_index,
+            )
         success_history.append(success)
+        evaluation_records.append(evaluation)
 
-        if not math.isnan(objective_value):
-            if best_parameters is None:
+        consider_for_best = success and not math.isnan(objective_value)
+        if consider_for_best:
+            if best_parameters is None or best_index < 0:
                 best_index = iteration_index
                 best_value = objective_value
                 best_parameters = dict(actual_params)
                 best_comsol_parameters = comsol_payload
             else:
                 is_better = (objective_value > best_value) if maximize else (objective_value < best_value)
-                if success and is_better:
+                if is_better:
                     best_index = iteration_index
                     best_value = objective_value
                     best_parameters = dict(actual_params)

@@ -1,4 +1,4 @@
-"""Analyze optimization results stored in JSON and plot GP mean/uncertainty slices."""
+"""Analyze optimization results stored in JSON and plot GP diagnostics."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--outlier-method",
         type=str,
-        default="mad",
+        default="zscore",
         choices=("none", "mad", "iqr", "zscore"),
         help="Strategy for removing objective outliers before fitting the GP (default: mad).",
     )
@@ -78,40 +78,142 @@ def _load_results(path: Path) -> dict:
     return data
 
 
-def _extract_gp_dataset(results: dict) -> tuple[np.ndarray, np.ndarray, list[dict]]:
-    gp_data = results.get("gaussian_process")
-    if not isinstance(gp_data, dict):
-        raise ValueError("Results JSON does not contain a 'gaussian_process' section.")
+def _extract_gp_dataset(
+    results: dict,
+) -> tuple[np.ndarray, np.ndarray, list[dict], dict, list[dict], np.ndarray]:
+    """Parse the COMSOL optimization results structure into arrays usable by the GP."""
+    header = results.get("header")
+    if not isinstance(header, dict):
+        raise ValueError("Results JSON must contain a 'header' section.")
 
-    parameter_definitions = gp_data.get("parameter_definitions")
-    if not isinstance(parameter_definitions, list) or not parameter_definitions:
-        raise ValueError("Gaussian process metadata is missing parameter definitions.")
+    inputs_meta = header.get("inputs")
+    if not isinstance(inputs_meta, list) or not inputs_meta:
+        raise ValueError("Results JSON must declare at least one input parameter.")
 
-    scaled = np.asarray(gp_data.get("scaled_parameters", []), dtype=float)
-    objectives = np.asarray(gp_data.get("objective_observations", []), dtype=float)
+    outputs_meta = header.get("outputs")
+    if not isinstance(outputs_meta, list) or not outputs_meta:
+        raise ValueError("Results JSON must declare at least one output/objective.")
 
-    # Always work with a flat 1D array of objectives
-    objectives = np.ravel(objectives)
+    parameter_definitions: list[dict] = []
+    for idx, entry in enumerate(inputs_meta):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Input definition #{idx} is not a JSON object.")
 
-    min_len = min(len(scaled), len(objectives))
-    scaled = scaled[:min_len]
-    objectives = objectives[:min_len]
+        name = str(entry.get("name") or f"input_{idx}")
+        bounds = entry.get("bounds")
+        if (
+            not isinstance(bounds, Sequence)
+            or isinstance(bounds, (str, bytes))
+            or len(bounds) != 2
+        ):
+            raise ValueError(f"Parameter '{name}' must provide numeric [lower, upper] bounds.")
 
-    if scaled.ndim == 1:
-        if scaled.size == 0:
-            scaled = scaled.reshape(0, len(parameter_definitions))
-        else:
-            scaled = scaled.reshape(-1, 1)
+        try:
+            lower = float(bounds[0])
+            upper = float(bounds[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Bounds for parameter '{name}' must be numeric.") from exc
 
-    mask = np.isfinite(objectives)
-    if scaled.size:
-        mask &= np.all(np.isfinite(scaled), axis=1)
-    else:
-        mask &= False
+        if math.isclose(lower, upper):
+            span = max(abs(lower), 1.0)
+            upper = lower + span
+        if lower > upper:
+            lower, upper = upper, lower
 
-    scaled = scaled[mask]
-    objectives = objectives[mask]
-    return scaled, objectives, parameter_definitions
+        parameter_definitions.append(
+            {
+                "name": name,
+                "unit": entry.get("unit"),
+                "bounds": (lower, upper),
+            }
+        )
+
+    output_definitions: list[dict] = []
+    for idx, entry in enumerate(outputs_meta):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Output definition #{idx} is not a JSON object.")
+        output_definitions.append(
+            {
+                "name": str(entry.get("name") or f"output_{idx}"),
+                "unit": entry.get("unit"),
+                "index": idx,
+            }
+        )
+
+    objective_definition = output_definitions[0]
+
+    rows = results.get("data")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Results JSON does not contain any data rows.")
+
+    scaled_rows: list[list[float]] = []
+    objectives: list[float] = []
+    outputs_matrix: list[list[float]] = []
+
+    for row in rows:
+        if (
+            not isinstance(row, Sequence)
+            or len(row) < 2
+            or isinstance(row, (str, bytes))
+        ):
+            continue
+
+        raw_inputs, raw_outputs = row[0], row[1]
+        if (
+            not isinstance(raw_inputs, Sequence)
+            or isinstance(raw_inputs, (str, bytes))
+            or len(raw_inputs) != len(parameter_definitions)
+        ):
+            continue
+        if (
+            not isinstance(raw_outputs, Sequence)
+            or not raw_outputs
+            or isinstance(raw_outputs, (str, bytes))
+            or len(raw_outputs) < len(output_definitions)
+        ):
+            continue
+
+        try:
+            physical_inputs = [float(value) for value in raw_inputs]
+            output_values = [
+                float(raw_outputs[idx]) for idx in range(len(output_definitions))
+            ]
+        except (TypeError, ValueError, IndexError):
+            continue
+
+        if not all(math.isfinite(value) for value in output_values):
+            continue
+
+        objective_value = output_values[objective_definition["index"]]
+        scaled_inputs = [
+            _to_unit(value, parameter_definitions[col]["bounds"])
+            for col, value in enumerate(physical_inputs)
+        ]
+        scaled_rows.append(scaled_inputs)
+        objectives.append(objective_value)
+        outputs_matrix.append(output_values)
+
+    scaled = (
+        np.asarray(scaled_rows, dtype=float)
+        if scaled_rows
+        else np.empty((0, len(parameter_definitions)), dtype=float)
+    )
+    objectives_array = (
+        np.asarray(objectives, dtype=float) if objectives else np.empty(0, dtype=float)
+    )
+    outputs_array = (
+        np.asarray(outputs_matrix, dtype=float)
+        if outputs_matrix
+        else np.empty((0, len(output_definitions)), dtype=float)
+    )
+    return (
+        scaled,
+        objectives_array,
+        parameter_definitions,
+        objective_definition,
+        output_definitions,
+        outputs_array,
+    )
 
 
 def _filter_outliers(
@@ -120,8 +222,8 @@ def _filter_outliers(
     *,
     method: str,
     threshold: float,
-) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Remove objective outliers using the requested strategy."""
+) -> tuple[np.ndarray, np.ndarray, dict, np.ndarray]:
+    """Remove objective outliers using the requested strategy and return the retention mask."""
     method = (method or "none").lower()
     threshold = max(0.0, float(threshold))
     total = int(objectives.size)
@@ -136,11 +238,11 @@ def _filter_outliers(
         "removed_values": [],
     }
 
-    if method == "none" or total < 3:
-        return scaled_samples, objectives, stats
-
     mask = np.ones(total, dtype=bool)
     values = objectives
+
+    if method == "none" or total < 3:
+        return scaled_samples, objectives, stats, mask
 
     if method == "mad":
         center = float(np.median(values))
@@ -177,7 +279,7 @@ def _filter_outliers(
     stats["retained"] = int(filtered_objectives.size)
     stats["removed_indices"] = np.where(~mask)[0].tolist()
     stats["removed_values"] = objectives[~mask].tolist()
-    return filtered_scaled, filtered_objectives, stats
+    return filtered_scaled, filtered_objectives, stats, mask
 
 
 def _to_physical(unit_values: np.ndarray, bounds: Sequence[float]) -> np.ndarray:
@@ -190,6 +292,11 @@ def _to_unit(value: float, bounds: Sequence[float]) -> float:
     if math.isclose(high, low):
         return 0.0
     return float(max(0.0, min(1.0, (value - low) / (high - low))))
+
+
+def _format_label(name: str, unit: str | None) -> str:
+    base = str(name or "value")
+    return base if not unit else f"{base} [{unit}]"
 
 
 def _determine_best_parameters(
@@ -277,6 +384,7 @@ def _plot_parameter_slice(
     objectives: np.ndarray,
     output_dir: Path,
     grid_points: int,
+    objective_label: str,
     ci_multiplier: float,
 ) -> Path:
     grid = np.linspace(0.0, 1.0, grid_points)
@@ -309,16 +417,54 @@ def _plot_parameter_slice(
     )
     ax.axvline(best_physical, linestyle="--", linewidth=1.5, label="Best parameter")
 
-    unit = param_def.get("unit")
-    label = param_def["name"] if not unit else f"{param_def['name']} [{unit}]"
+    label = _format_label(param_def["name"], param_def.get("unit"))
     ax.set_xlabel(label)
-    ax.set_ylabel("Objective value")
+    ax.set_ylabel(objective_label)
     ax.set_title(f"Mean & Uncertainty vs {label}")
     ax.grid(True, linestyle="--", alpha=0.2)
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     output_path = output_dir / f"mean_uncertainty_{param_def['name']}.png"
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
+def _plot_outputs_over_iterations(
+    *,
+    outputs: np.ndarray,
+    output_definitions: Sequence[dict],
+    output_dir: Path,
+) -> Path:
+    if outputs.size == 0 or outputs.shape[1] == 0:
+        raise ValueError("At least one output is required to create the iteration plot.")
+
+    iterations = np.arange(1, outputs.shape[0] + 1)
+    fig, ax = plt.subplots(figsize=(7.0, 4.0))
+    plotted = False
+    for idx, definition in enumerate(output_definitions):
+        if idx >= outputs.shape[1]:
+            break
+        series = outputs[:, idx]
+        mask = np.isfinite(series)
+        if not np.any(mask):
+            continue
+        label = _format_label(definition["name"], definition.get("unit"))
+        ax.plot(iterations[mask], series[mask], marker="o", linewidth=1.5, label=label)
+        plotted = True
+
+    if not plotted:
+        raise ValueError("No finite output values available for plotting.")
+
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Output value")
+    ax.set_title("Outputs vs Iteration")
+    ax.grid(True, linestyle="--", alpha=0.2)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+
+    output_path = output_dir / "outputs_vs_iteration.png"
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
     return output_path
@@ -334,17 +480,35 @@ def _write_summary(output_dir: Path, summary: dict) -> Path:
 def main() -> None:
     args = _parse_args()
     results = _load_results(args.results_path)
-    scaled_samples, objectives, parameter_definitions = _extract_gp_dataset(results)
+    (
+        scaled_samples,
+        objectives,
+        parameter_definitions,
+        objective_definition,
+        output_definitions,
+        raw_outputs,
+    ) = _extract_gp_dataset(results)
+    objective_label = _format_label(
+        objective_definition["name"], objective_definition.get("unit")
+    )
 
     if scaled_samples.size == 0 or objectives.size == 0:
         raise ValueError("No valid evaluations found in the results JSON.")
 
-    scaled_samples, objectives, outlier_stats = _filter_outliers(
+    scaled_samples, objectives, outlier_stats, retained_mask = _filter_outliers(
         scaled_samples,
         objectives,
         method=args.outlier_method,
         threshold=args.outlier_threshold,
     )
+
+    if raw_outputs.size:
+        if raw_outputs.shape[0] != retained_mask.size:
+            raise ValueError(
+                "The number of output rows does not match the number of objective evaluations; "
+                "cannot consistently drop filtered points."
+            )
+        raw_outputs = raw_outputs[retained_mask]
 
     if objectives.size == 0:
         raise ValueError(
@@ -363,12 +527,14 @@ def main() -> None:
         results, parameter_definitions, scaled_samples, objectives
     )
 
-    # Robust handling of best objective from results
-    raw_best_objective = results.get("objective_value", None)
-    try:
-        best_objective = float(raw_best_objective)
-    except (TypeError, ValueError):
-        best_objective = float(np.max(objectives))
+    best_objective = float(np.max(objectives))
+
+    objective_metadata = {
+        "name": objective_definition["name"],
+        "unit": objective_definition.get("unit"),
+        "index": objective_definition["index"],
+        "label": objective_label,
+    }
 
     summary = {
         "results_path": str(args.results_path),
@@ -377,8 +543,9 @@ def main() -> None:
         "num_evaluations": int(objectives.size),
         "objective_min": float(np.min(objectives)),
         "objective_max": float(np.max(objectives)),
-        "best_objective": best_objective,
         "best_parameters": best_physical,
+        "objective": objective_metadata,
+        "outputs": output_definitions,
         "outlier_filter": outlier_stats,
     }
 
@@ -391,11 +558,22 @@ def main() -> None:
             f"{summary['num_evaluations']} evaluations retained after filtering "
             f"{summary['num_filtered_outliers']} outlier(s)."
         )
-    print(f"Best objective: {summary['best_objective']:.6g}")
+    print(f"Best objective ({objective_label}): {summary['objective_max']:.6g}")
+    print(f"Worst objective ({objective_label}): {summary['objective_min']:.6g}")
     print("Best parameters:")
     for name, value in best_physical.items():
         print(f"  - {name}: {value:.6g}")
     print(f"Summary saved to '{summary_path}'.")
+
+    outputs_plot_path = None
+    try:
+        outputs_plot_path = _plot_outputs_over_iterations(
+            outputs=raw_outputs,
+            output_definitions=output_definitions,
+            output_dir=args.output_dir,
+        )
+    except ValueError:
+        pass
 
     # GP fitting and plotting
     gp = _fit_gaussian_process(scaled_samples, objectives)
@@ -410,10 +588,13 @@ def main() -> None:
             objectives=objectives,
             output_dir=args.output_dir,
             grid_points=max(10, args.grid_points),
+            objective_label=objective_label,
             ci_multiplier=max(0.0, args.ci_multiplier),
         )
         plot_paths.append(path)
 
+    if outputs_plot_path:
+        print(f"Saved output history plot to '{outputs_plot_path}'.")
     print(f"Generated {len(plot_paths)} mean & uncertainty plots in '{args.output_dir}'.")
 
 
