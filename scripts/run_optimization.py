@@ -20,7 +20,16 @@ def _parse_args() -> argparse.Namespace:
         "--results-path",
         type=Path,
         default=None,
-        help="Path to store incremental optimization results (defaults to optimization_results.json).",
+        help="Path to store the formatted optimization dataset (defaults to optimization_results.json).",
+    )
+    parser.add_argument(
+        "--raw-results-path",
+        type=Path,
+        default=None,
+        help=(
+            "Path to store detailed optimizer snapshots used for resuming "
+            "(defaults to '<results-path>_raw.json')."
+        ),
     )
     parser.add_argument(
         "--resume-from",
@@ -38,6 +47,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 ACTIVE_STATE_PATH = Path("active_optimization.json")
+DEFAULT_OUTPUT_DEFINITIONS = [
+    {"name": "power_mw", "unit": "mW", "bounds": None},
+]
 
 
 class ActiveOptimizationTracker:
@@ -204,13 +216,128 @@ def _build_run_settings(
     }
 
 
+def _default_raw_results_path(formatted_path: Path) -> Path:
+    suffix = formatted_path.suffix
+    if suffix:
+        return formatted_path.with_name(f"{formatted_path.stem}_raw{suffix}")
+    return formatted_path.with_name(f"{formatted_path.name}_raw.json")
+
+
+def _coerce_sequence(payload: object) -> list[object]:
+    if payload is None:
+        return []
+    if hasattr(payload, "tolist"):
+        try:
+            payload = payload.tolist()
+        except Exception:
+            pass
+    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+        return list(payload)
+    return [payload]
+
+
+def _coerce_numeric_series(payload: object, *, length: int | None = None) -> list[float]:
+    values: list[float] = []
+    for item in _coerce_sequence(payload):
+        try:
+            values.append(float(item))
+        except (TypeError, ValueError):
+            values.append(float("nan"))
+    if length is not None and len(values) < length:
+        values.extend([float("nan")] * (length - len(values)))
+    return values[:length] if length is not None else values
+
+
+def _coerce_bool_series(payload: object, *, length: int) -> list[bool]:
+    values = [bool(item) for item in _coerce_sequence(payload)]
+    if len(values) < length:
+        values.extend([False] * (length - len(values)))
+    return values[:length]
+
+
+def _build_header_payload(parameters: Sequence[OptimizationParameter]) -> dict[str, list[dict[str, object]]]:
+    inputs: list[dict[str, object]] = []
+    for param in parameters:
+        inputs.append(
+            {
+                "name": param.name,
+                "unit": param.unit,
+                "bounds": [float(param.bounds[0]), float(param.bounds[1])],
+                "value_type": param.value_type,
+                "comsol_name": param.comsol_name,
+                "transform": param.transform,
+                "is_constant": param.is_constant,
+                "constant_value": float(param.constant_value) if param.constant_value is not None else None,
+            }
+        )
+    outputs = [dict(entry) for entry in DEFAULT_OUTPUT_DEFINITIONS]
+    return {"inputs": inputs, "outputs": outputs}
+
+
+def _build_data_rows(
+    *,
+    parameters: Sequence[OptimizationParameter],
+    results: Mapping[str, object],
+) -> list[list[list[float]]]:
+    objective_values = _coerce_numeric_series(results.get("objective_history"))
+    total = len(objective_values)
+    if total == 0:
+        return []
+
+    success_series = _coerce_bool_series(results.get("success_history"), length=total)
+    parameter_history = results.get("parameter_history") or {}
+
+    per_parameter_values: dict[str, list[float]] = {}
+    for param in parameters:
+        per_parameter_values[param.name] = _coerce_numeric_series(
+            parameter_history.get(param.name), length=total
+        )
+
+    data_rows: list[list[list[float]]] = []
+    for idx in range(total):
+        if idx >= len(success_series) or not success_series[idx]:
+            continue
+        objective_value = objective_values[idx]
+        if not math.isfinite(objective_value):
+            continue
+        inputs: list[float] = []
+        invalid_input = False
+        for param in parameters:
+            series = per_parameter_values.get(param.name, [])
+            value = series[idx] if idx < len(series) else float("nan")
+            if not math.isfinite(value):
+                invalid_input = True
+                break
+            inputs.append(value)
+        if invalid_input:
+            continue
+        data_rows.append([inputs, [float(objective_value)]])
+    return data_rows
+
+
+def _format_results_for_export(
+    *,
+    parameters: Sequence[OptimizationParameter],
+    results: Mapping[str, object],
+) -> dict[str, object]:
+    header = _build_header_payload(parameters)
+    data_rows = _build_data_rows(parameters=parameters, results=results)
+    return {"header": header, "data": data_rows}
+
+
+def _write_json(path: Path, payload: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
 def main() -> None:
     args = _parse_args()
 
     MODEL_PATH = "teg_no_electrodes.mph"
     N_INITIAL = 10
-    N_ITERATIONS = 40
-    RANDOM_SEED = 42
+    N_ITERATIONS = 64
+    RANDOM_SEED = 67
 
     COMSOL_EXE = r"C:\\Program Files\\COMSOL\\COMSOL63\\Multiphysics_NSL\\bin\\win64\\comsolbatch.exe"
 
@@ -247,7 +374,13 @@ def main() -> None:
         ),
     ]
 
-    results_path = args.results_path or args.resume_from or Path("optimization_results.json")
+    formatted_results_path = args.results_path or Path("optimization_results.json")
+    raw_results_path = args.raw_results_path
+    if raw_results_path is None:
+        if args.resume_from is not None:
+            raw_results_path = args.resume_from
+        else:
+            raw_results_path = _default_raw_results_path(formatted_results_path)
     autosave_interval = max(1, args.autosave_interval)
 
     resume_path = args.resume_from
@@ -269,7 +402,7 @@ def main() -> None:
         n_initial=N_INITIAL,
         n_iterations=N_ITERATIONS,
         random_seed=RANDOM_SEED,
-        results_path=results_path,
+        results_path=raw_results_path,
         autosave_interval=autosave_interval,
         parameters=PARAMETERS,
         resume_path=resume_path,
@@ -288,7 +421,7 @@ def main() -> None:
             random_seed=RANDOM_SEED,
             maximize=True,
             parameters=PARAMETERS,
-            results_path=results_path,
+            results_path=raw_results_path,
             resume_path=resume_path,
             autosave_interval=autosave_interval,
             progress_callback=tracker.handle_progress,
@@ -301,6 +434,13 @@ def main() -> None:
 
     objective_value = float(results["objective"])
     best_parameters = results["best_parameters"]
+    formatted_payload = _format_results_for_export(parameters=PARAMETERS, results=results)
+    _write_json(formatted_results_path, formatted_payload)
+    if not formatted_payload["data"]:
+        print(
+            "Warning: no successful evaluations were exported to the formatted dataset; "
+            "the JSON file currently contains only parameter metadata."
+        )
 
     print("\nOptimization completed.")
     if math.isnan(objective_value):
@@ -310,7 +450,11 @@ def main() -> None:
         for name, value in best_parameters.items():
             print(f"  {name}: {float(value):.6g}")
 
-    print(f"\nProgress snapshots saved to '{results_path}'.")
+    if raw_results_path == formatted_results_path:
+        print(f"\nFormatted optimization dataset saved to '{formatted_results_path}'.")
+    else:
+        print(f"\nOptimizer snapshots saved to '{raw_results_path}'.")
+        print(f"Formatted optimization dataset saved to '{formatted_results_path}'.")
 
 
 if __name__ == "__main__":
