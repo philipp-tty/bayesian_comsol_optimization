@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # Ensure plotting works in headless environments.
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import numpy as np
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -64,6 +65,26 @@ def _parse_args() -> argparse.Namespace:
             "Threshold multiplier used by the selected outlier method "
             "(e.g. 3.5 MAD, 1.5 IQR, or standard deviations)."
         ),
+    )
+    parser.add_argument(
+        "--iso-x-parameter",
+        type=str,
+        default=None,
+        help=(
+            "Name of the parameter to use as the x-axis for iso contour plots "
+            "(all other parameters will be cycled on the y-axis)."
+        ),
+    )
+    parser.add_argument(
+        "--iso-grid-points",
+        type=int,
+        default=60,
+        help="Number of grid steps per axis when evaluating iso contour slices.",
+    )
+    parser.add_argument(
+        "--no-parallel-coordinates",
+        action="store_true",
+        help="Skip generating the parallel coordinates visualization.",
     )
     return parser.parse_args()
 
@@ -214,6 +235,16 @@ def _extract_gp_dataset(
         output_definitions,
         outputs_array,
     )
+
+
+def _resolve_parameter_index(parameter_definitions: Sequence[dict], name: str) -> int:
+    lookup = str(name or "").strip().lower()
+    if not lookup:
+        raise ValueError("Parameter name cannot be empty.")
+    for idx, definition in enumerate(parameter_definitions):
+        if definition["name"].strip().lower() == lookup:
+            return idx
+    raise ValueError(f"Unknown parameter '{name}'. Available: {[p['name'] for p in parameter_definitions]}")
 
 
 def _filter_outliers(
@@ -431,6 +462,161 @@ def _plot_parameter_slice(
     return output_path
 
 
+def _plot_iso_contours(
+    *,
+    gp: GaussianProcessRegressor,
+    x_index: int,
+    parameter_definitions: Sequence[dict],
+    best_unit: np.ndarray,
+    scaled_samples: np.ndarray,
+    objectives: np.ndarray,
+    output_dir: Path,
+    grid_points: int,
+    objective_label: str,
+) -> list[Path]:
+    if grid_points < 5:
+        raise ValueError("At least 5 grid points per axis are required for iso contour plots.")
+
+    x_definition = parameter_definitions[x_index]
+    x_label = _format_label(x_definition["name"], x_definition.get("unit"))
+    unit_grid = np.linspace(0.0, 1.0, grid_points)
+    xx, yy = np.meshgrid(unit_grid, unit_grid)
+    base = np.tile(best_unit, (grid_points * grid_points, 1))
+
+    paths: list[Path] = []
+    for y_index, y_definition in enumerate(parameter_definitions):
+        if y_index == x_index:
+            continue
+
+        evaluation_points = base.copy()
+        evaluation_points[:, x_index] = xx.ravel()
+        evaluation_points[:, y_index] = yy.ravel()
+        mean, _ = _gp_predict_with_std(gp, evaluation_points)
+        contour_values = mean.reshape(grid_points, grid_points)
+
+        x_physical = _to_physical(xx, x_definition["bounds"])
+        y_physical = _to_physical(yy, y_definition["bounds"])
+        observations_x = _to_physical(scaled_samples[:, x_index], x_definition["bounds"])
+        observations_y = _to_physical(scaled_samples[:, y_index], y_definition["bounds"])
+
+        best_x = _to_physical(np.array([best_unit[x_index]]), x_definition["bounds"])[0]
+        best_y = _to_physical(np.array([best_unit[y_index]]), y_definition["bounds"])[0]
+
+        fig, ax = plt.subplots(figsize=(6.4, 5.0))
+        contour = ax.contourf(
+            x_physical,
+            y_physical,
+            contour_values,
+            levels=20,
+            cmap="viridis",
+        )
+        fig.colorbar(contour, ax=ax, label=objective_label)
+        scatter = ax.scatter(
+            observations_x,
+            observations_y,
+            c=objectives,
+            cmap="viridis",
+            norm=contour.norm,
+            s=25,
+            edgecolors="white",
+            linewidths=0.4,
+            alpha=0.85,
+            label="Evaluations",
+        )
+        ax.scatter(
+            best_x,
+            best_y,
+            marker="*",
+            s=150,
+            color="red",
+            edgecolors="black",
+            linewidths=0.8,
+            label="Best point",
+            zorder=3,
+        )
+        y_label = _format_label(y_definition["name"], y_definition.get("unit"))
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(f"Iso contours: {y_label} vs {x_label}")
+        ax.grid(True, linestyle="--", alpha=0.2)
+        ax.legend(loc="upper right", fontsize=8)
+        fig.tight_layout()
+
+        safe_x = x_definition["name"].replace(" ", "_")
+        safe_y = y_definition["name"].replace(" ", "_")
+        output_path = output_dir / f"iso_contour_{safe_y}_vs_{safe_x}.png"
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
+        paths.append(output_path)
+    return paths
+
+
+def _plot_parallel_coordinates(
+    *,
+    scaled_samples: np.ndarray,
+    objectives: np.ndarray,
+    parameter_definitions: Sequence[dict],
+    objective_label: str,
+    output_dir: Path,
+) -> Path:
+    if scaled_samples.size == 0 or objectives.size == 0:
+        raise ValueError("At least one evaluation is required to create the parallel coordinates plot.")
+
+    # Normalize objectives for coloring, falling back to 0.5 if constant.
+    obj_min = float(np.min(objectives))
+    obj_max = float(np.max(objectives))
+    if math.isclose(obj_min, obj_max):
+        normalized_objectives = np.full_like(objectives, 0.5, dtype=float)
+        vmax = obj_min + 1.0
+    else:
+        normalized_objectives = (objectives - obj_min) / (obj_max - obj_min)
+        vmax = obj_max
+    norm = mcolors.Normalize(vmin=obj_min, vmax=vmax)
+
+    data = np.column_stack((scaled_samples, normalized_objectives))
+    num_axes = data.shape[1]
+    axis_positions = np.arange(num_axes)
+    axis_labels = [
+        _format_label(definition["name"], definition.get("unit")) for definition in parameter_definitions
+    ] + [f"{objective_label} (normalized)"]
+
+    fig, ax = plt.subplots(figsize=(max(8.0, num_axes * 1.3), 5.0))
+    colors = plt.cm.viridis(norm(objectives))
+    for row, color in zip(data, colors, strict=False):
+        ax.plot(axis_positions, row, color=color, linewidth=0.8, alpha=0.7)
+
+    # Highlight the best objective sample if available.
+    best_idx = int(np.nanargmax(objectives))
+    ax.plot(
+        axis_positions,
+        data[best_idx],
+        color="red",
+        linewidth=2.0,
+        alpha=0.9,
+        label="Best objective",
+    )
+
+    scalar_mappable = plt.cm.ScalarMappable(norm=norm, cmap="viridis")
+    scalar_mappable.set_array(objectives)
+    cbar = fig.colorbar(scalar_mappable, ax=ax)
+    cbar.set_label(objective_label)
+
+    ax.set_xticks(axis_positions)
+    ax.set_xticklabels(axis_labels, rotation=20, ha="right")
+    ax.set_xlim(axis_positions[0], axis_positions[-1])
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("Normalized value")
+    ax.set_title("Parallel coordinates (parameters normalized to [0, 1])")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.2)
+    ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+
+    output_path = output_dir / "parallel_coordinates.png"
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
 def _plot_outputs_over_iterations(
     *,
     outputs: np.ndarray,
@@ -593,9 +779,44 @@ def main() -> None:
         )
         plot_paths.append(path)
 
+    iso_plot_paths: list[Path] = []
+    if args.iso_x_parameter:
+        x_axis_index = _resolve_parameter_index(parameter_definitions, args.iso_x_parameter)
+        iso_plot_paths = _plot_iso_contours(
+            gp=gp,
+            x_index=x_axis_index,
+            parameter_definitions=parameter_definitions,
+            best_unit=best_unit,
+            scaled_samples=scaled_samples,
+            objectives=objectives,
+            output_dir=args.output_dir,
+            grid_points=max(5, args.iso_grid_points),
+            objective_label=objective_label,
+        )
+
+    parallel_plot_path: Path | None = None
+    if not args.no_parallel_coordinates:
+        try:
+            parallel_plot_path = _plot_parallel_coordinates(
+                scaled_samples=scaled_samples,
+                objectives=objectives,
+                parameter_definitions=parameter_definitions,
+                objective_label=objective_label,
+                output_dir=args.output_dir,
+            )
+        except ValueError:
+            parallel_plot_path = None
+
     if outputs_plot_path:
         print(f"Saved output history plot to '{outputs_plot_path}'.")
     print(f"Generated {len(plot_paths)} mean & uncertainty plots in '{args.output_dir}'.")
+    if iso_plot_paths:
+        print(
+            f"Generated {len(iso_plot_paths)} iso contour plot(s) with x-axis parameter "
+            f"'{parameter_definitions[x_axis_index]['name']}' in '{args.output_dir}'."
+        )
+    if parallel_plot_path:
+        print(f"Saved parallel coordinates plot to '{parallel_plot_path}'.")
 
 
 if __name__ == "__main__":
