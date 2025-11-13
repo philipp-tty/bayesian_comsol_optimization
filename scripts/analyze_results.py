@@ -399,6 +399,8 @@ def _validate_expression_ast(
         elif isinstance(node, ast.Constant):
             if not isinstance(node.value, (int, float)):
                 raise ValueError("Only numeric constants are allowed in expressions.")
+        elif isinstance(node, _ALLOWED_BINOPS + _ALLOWED_UNARYOPS):
+            continue
         elif isinstance(node, (ast.Load, ast.Expression, ast.keyword)):
             continue
         else:
