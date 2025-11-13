@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
 from pathlib import Path
@@ -85,6 +86,22 @@ def _parse_args() -> argparse.Namespace:
         "--no-parallel-coordinates",
         action="store_true",
         help="Skip generating the parallel coordinates visualization.",
+    )
+    parser.add_argument(
+        "--parameter-expression",
+        type=str,
+        default=None,
+        help=(
+            "Expression involving input parameter names (e.g. '(n_legs^2 * leg_width^2) / ...') "
+            "that will be evaluated for each retained sample and used as the x-axis when plotting "
+            "all outputs."
+        ),
+    )
+    parser.add_argument(
+        "--parameter-expression-label",
+        type=str,
+        default=None,
+        help="Optional custom label for the expression-based x-axis. Defaults to the expression itself.",
     )
     return parser.parse_args()
 
@@ -323,6 +340,123 @@ def _to_unit(value: float, bounds: Sequence[float]) -> float:
     if math.isclose(high, low):
         return 0.0
     return float(max(0.0, min(1.0, (value - low) / (high - low))))
+
+
+def _scaled_to_physical(
+    scaled_samples: np.ndarray, parameter_definitions: Sequence[dict]
+) -> np.ndarray:
+    """Convert unit-hypercube samples back into their physical parameter values."""
+    if scaled_samples.size == 0:
+        return np.empty_like(scaled_samples, dtype=float)
+    physical = np.empty_like(scaled_samples, dtype=float)
+    for axis, definition in enumerate(parameter_definitions):
+        physical[:, axis] = _to_physical(scaled_samples[:, axis], definition["bounds"])
+    return physical
+
+
+_ALLOWED_ATTRIBUTE_BASES = {"math", "np", "numpy"}
+_ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv)
+_ALLOWED_UNARYOPS = (ast.UAdd, ast.USub)
+
+
+def _validate_expression_ast(
+    tree: ast.AST,
+    allowed_names: set[str],
+    allowed_attribute_bases: set[str],
+) -> None:
+    """Ensure the parsed expression only contains safe node types and identifiers."""
+
+    def _validate_attribute(node: ast.Attribute) -> None:
+        if not isinstance(node.value, ast.Name) or node.value.id not in allowed_attribute_bases:
+            raise ValueError(
+                "Expressions may only access attributes of the 'math', 'np', or 'numpy' namespaces."
+            )
+        if node.attr.startswith("_"):
+            raise ValueError("Access to private attributes is not permitted in expressions.")
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp):
+            if not isinstance(node.op, _ALLOWED_BINOPS):
+                raise ValueError("Encountered an unsupported binary operator in the expression.")
+        elif isinstance(node, ast.UnaryOp):
+            if not isinstance(node.op, _ALLOWED_UNARYOPS):
+                raise ValueError("Encountered an unsupported unary operator in the expression.")
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id not in allowed_names:
+                    raise ValueError(f"Function '{node.func.id}' is not permitted in expressions.")
+            elif isinstance(node.func, ast.Attribute):
+                _validate_attribute(node.func)
+            else:
+                raise ValueError("Expressions may only call named or module attribute functions.")
+        elif isinstance(node, ast.Attribute):
+            _validate_attribute(node)
+        elif isinstance(node, ast.Name):
+            if node.id not in allowed_names:
+                raise ValueError(
+                    f"Name '{node.id}' is not available in expressions; use input parameter names."
+                )
+        elif isinstance(node, ast.Constant):
+            if not isinstance(node.value, (int, float)):
+                raise ValueError("Only numeric constants are allowed in expressions.")
+        elif isinstance(node, (ast.Load, ast.Expression, ast.keyword)):
+            continue
+        else:
+            raise ValueError("Expressions may only contain arithmetic operations and function calls.")
+
+
+def _evaluate_parameter_expression(
+    expression: str,
+    parameter_definitions: Sequence[dict],
+    scaled_samples: np.ndarray,
+) -> np.ndarray:
+    """Evaluate an expression of the input parameters for every retained sample."""
+    if scaled_samples.shape[0] == 0:
+        raise ValueError("Cannot evaluate a parameter expression without any samples.")
+
+    normalized = (expression or "").strip()
+    if not normalized:
+        raise ValueError("Parameter expression cannot be empty.")
+    normalized = normalized.replace("^", "**")
+
+    try:
+        tree = ast.parse(normalized, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid parameter expression '{expression}': {exc}") from exc
+
+    physical_samples = _scaled_to_physical(scaled_samples, parameter_definitions)
+    parameter_context = {
+        definition["name"]: physical_samples[:, axis]
+        for axis, definition in enumerate(parameter_definitions)
+    }
+    allowed_bases = set(_ALLOWED_ATTRIBUTE_BASES)
+    allowed_names = set(parameter_context) | allowed_bases | {"pi", "tau", "e"}
+    _validate_expression_ast(tree, allowed_names, allowed_bases)
+
+    evaluation_locals = dict(parameter_context)
+    evaluation_locals.update(
+        {
+            "np": np,
+            "numpy": np,
+            "math": math,
+            "pi": math.pi,
+            "tau": math.tau,
+            "e": math.e,
+        }
+    )
+
+    try:
+        compiled = compile(tree, "<parameter_expression>", "eval")
+        values = eval(compiled, {"__builtins__": {}}, evaluation_locals)
+    except Exception as exc:  # pragma: no cover - expression failures are user-driven
+        raise ValueError(f"Failed to evaluate parameter expression '{expression}': {exc}") from exc
+
+    values_array = np.asarray(values, dtype=float).reshape(-1)
+    if values_array.size != scaled_samples.shape[0]:
+        raise ValueError(
+            "Parameter expression must evaluate to exactly one value per retained sample."
+        )
+    return values_array
 
 
 def _format_label(name: str, unit: str | None) -> str:
@@ -656,6 +790,63 @@ def _plot_outputs_over_iterations(
     return output_path
 
 
+def _plot_outputs_vs_expression(
+    *,
+    expression_values: np.ndarray,
+    outputs: np.ndarray,
+    output_definitions: Sequence[dict],
+    output_dir: Path,
+    expression_label: str,
+) -> Path:
+    """Plot each output against an evaluated parameter expression."""
+    x_values = np.asarray(expression_values, dtype=float).reshape(-1)
+    y_values = np.asarray(outputs, dtype=float)
+    if x_values.size == 0 or y_values.size == 0:
+        raise ValueError("Expression values and outputs must both be provided for plotting.")
+    if x_values.shape[0] != y_values.shape[0]:
+        raise ValueError(
+            "Expression values must have the same number of entries as the output observations."
+        )
+    if y_values.ndim == 1:
+        y_values = y_values.reshape(-1, 1)
+
+    finite_x = np.isfinite(x_values)
+    if not np.any(finite_x):
+        raise ValueError("Expression evaluation did not produce any finite values.")
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.5))
+    plotted = False
+    for idx, definition in enumerate(output_definitions):
+        if idx >= y_values.shape[1]:
+            break
+        series = y_values[:, idx]
+        mask = finite_x & np.isfinite(series)
+        if not np.any(mask):
+            continue
+        ordering = np.argsort(x_values[mask])
+        x_sorted = x_values[mask][ordering]
+        y_sorted = series[mask][ordering]
+        label = _format_label(definition["name"], definition.get("unit"))
+        ax.plot(x_sorted, y_sorted, marker="o", linewidth=1.5, label=label)
+        plotted = True
+
+    if not plotted:
+        raise ValueError("No finite output values remained after filtering; cannot plot expression.")
+
+    label = expression_label.strip() or "Parameter expression"
+    ax.set_xlabel(label)
+    ax.set_ylabel("Output value")
+    ax.set_title(f"Outputs vs {label}")
+    ax.grid(True, linestyle="--", alpha=0.2)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+
+    output_path = output_dir / "outputs_vs_expression.png"
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
 def _write_summary(output_dir: Path, summary: dict) -> Path:
     summary_path = output_dir / "summary.json"
     with summary_path.open("w", encoding="utf-8") as handle:
@@ -761,6 +952,33 @@ def main() -> None:
     except ValueError:
         pass
 
+    expression_plot_path = None
+    if args.parameter_expression:
+        if raw_outputs.size == 0 or raw_outputs.shape[1] == 0:
+            print(
+                "Skipping parameter expression plot because no raw outputs are available "
+                "in the results JSON."
+            )
+        else:
+            try:
+                expression_values = _evaluate_parameter_expression(
+                    args.parameter_expression,
+                    parameter_definitions,
+                    scaled_samples,
+                )
+                expression_label = args.parameter_expression_label or args.parameter_expression
+                expression_plot_path = _plot_outputs_vs_expression(
+                    expression_values=expression_values,
+                    outputs=raw_outputs,
+                    output_definitions=output_definitions,
+                    output_dir=args.output_dir,
+                    expression_label=expression_label,
+                )
+            except ValueError as exc:
+                print(
+                    f"Failed to evaluate/plot parameter expression '{args.parameter_expression}': {exc}"
+                )
+
     # GP fitting and plotting
     gp = _fit_gaussian_process(scaled_samples, objectives)
     plot_paths: list[Path] = []
@@ -809,6 +1027,8 @@ def main() -> None:
 
     if outputs_plot_path:
         print(f"Saved output history plot to '{outputs_plot_path}'.")
+    if expression_plot_path:
+        print(f"Saved output-vs-expression plot to '{expression_plot_path}'.")
     print(f"Generated {len(plot_paths)} mean & uncertainty plots in '{args.output_dir}'.")
     if iso_plot_paths:
         print(
