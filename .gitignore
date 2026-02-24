@@ -143,8 +143,8 @@ build/
 secrets.json
 credentials.json
 
-# Analysis artifacts
-analysis/
+# Analysis output artifacts
+/analysis/
 
 optimization_results.json
 optimization_results - Copy.json
