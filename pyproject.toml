@@ -25,6 +25,8 @@ comsol-opt = "comsol_opt.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+packages = [
+    "comsol_opt",
+    "comsol_opt.comsol",
+    "comsol_opt.analysis",
+]
