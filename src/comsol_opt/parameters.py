@@ -25,8 +25,8 @@ class OptimizationParameter:
     bounds:
         Physical-domain lower and upper bound for the parameter.
     comsol_name:
-        Name of the parameter in the COMSOL model. The optimization routine
-        will pass values to COMSOL using this identifier.
+        Name of the parameter in the COMSOL model. Defaults to ``name`` if
+        not provided.
     unit:
         Optional unit string appended in the COMSOL CLI call, e.g. ``"mm"``.
     value_type:
@@ -35,15 +35,24 @@ class OptimizationParameter:
         to ``"even_integer"`` / ``"odd_integer"``. Integral parameters are
         coerced to the nearest in-bounds value that satisfies the constraint
         before being evaluated.
+    transform:
+        Coordinate transform kind: ``"linear"`` (default) or ``"fill_factor"``.
+    constant_value:
+        If set, the parameter is fixed at this value and excluded from
+        the active search space.
+    log_scale:
+        If ``True``, the parameter is better explored in log space. The
+        optimizer may apply a log transformation internally.
     """
 
     name: str
     bounds: Tuple[float, float]
-    comsol_name: str
+    comsol_name: str | None = None
     unit: str | None = None
     value_type: ValueType = "continuous"
     transform: TransformKind = "linear"
     constant_value: float | None = None
+    log_scale: bool = False
 
     def __post_init__(self) -> None:
         lower, upper = self.bounds
@@ -87,6 +96,11 @@ class OptimizationParameter:
                     f"its integer or parity constraints."
                 )
             object.__setattr__(self, "constant_value", coerced)
+
+    @property
+    def effective_comsol_name(self) -> str:
+        """Return the COMSOL parameter name, falling back to ``name``."""
+        return self.comsol_name if self.comsol_name is not None else self.name
 
     @property
     def is_integer(self) -> bool:

@@ -4,26 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "comsol-opt"
-version = "0.2.0"
-description = "CLI utilities for COMSOL-based thermoelectric generator optimization."
+version = "1.0.0"
+description = "Bayesian optimization for COMSOL simulations using BoTorch."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "botorch>=0.11",
+    "gpytorch>=1.11",
+    "torch>=2.0",
     "numpy",
-    "scikit-optimize",
-    "torch",
     "matplotlib",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
-dev = ["black", "ruff"]
+dev = ["pytest", "ruff"]
 
 [project.scripts]
-comsol-opt-run = "scripts.run_optimization:main"
+comsol-opt = "comsol_opt.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

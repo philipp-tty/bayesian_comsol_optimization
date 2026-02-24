@@ -1,14 +1,16 @@
-"""High-level package for COMSOL-based thermoelectric optimization."""
+"""Bayesian optimization for COMSOL simulations using BoTorch."""
 
 from __future__ import annotations
 
 import logging
 
-from .comsol_cli import COMSOLCLIOptimizer
+from .comsol.runner import COMSOLRunner
+from .objective import EvaluationResult, ObjectiveFunction, wrap_callable
+from .optimizer import BayesianOptimizer
 from .parameters import OptimizationParameter
+from .state import OptimizationState
+from .surrogate import GPSurrogate
 from .transforms import FillFactorTransform, LinearParameterTransform
-from .visualization import GPVisualizer
-from .workflow import optimize_model
 
 # Configure a default logging setup if the host application has not done so.
 _root_logger = logging.getLogger()
@@ -20,10 +22,14 @@ if not _root_logger.handlers:
     )
 
 __all__ = [
-    "COMSOLCLIOptimizer",
+    "BayesianOptimizer",
+    "COMSOLRunner",
+    "EvaluationResult",
     "FillFactorTransform",
+    "GPSurrogate",
     "LinearParameterTransform",
-    "GPVisualizer",
+    "ObjectiveFunction",
     "OptimizationParameter",
-    "optimize_model",
+    "OptimizationState",
+    "wrap_callable",
 ]
