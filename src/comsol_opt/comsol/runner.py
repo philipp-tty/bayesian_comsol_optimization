@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -73,6 +75,10 @@ class COMSOLRunner:
                 raise ValueError(f"Duplicate parameter name: {p.name!r}")
             names_seen.add(p.name)
 
+        # Evaluation tracking for output archiving
+        self._eval_count: int = 0
+        self._run_id: str = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         # GUI integration helpers
         self._event_pump: Callable[[], None] | None = None
         self._event_poll_interval: float = 0.05
@@ -89,6 +95,24 @@ class COMSOLRunner:
         if poll_interval is not None:
             self._event_poll_interval = max(0.0, float(poll_interval))
 
+    def _archive_file(self, filename: str, prefix: str = "") -> None:
+        """Move an output file to the current evaluation's archive directory."""
+        src = Path(filename)
+        if not src.exists():
+            return
+        archive_dir = (
+            Path("comsol_output_archive")
+            / f"run_{self._run_id}"
+            / f"iter_{self._eval_count:04d}"
+        )
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        dest_name = f"{prefix}{src.name}" if prefix else src.name
+        try:
+            shutil.move(str(src), str(archive_dir / dest_name))
+            logger.debug("Archived %s -> %s", src, archive_dir / dest_name)
+        except Exception:
+            logger.warning("Failed to archive %s", src, exc_info=True)
+
     def evaluate(self, parameters: dict[str, float]) -> EvaluationResult:
         """Run a COMSOL simulation and return the result.
 
@@ -99,6 +123,8 @@ class COMSOLRunner:
             parameters may be omitted (their configured values are used).
         """
         output_file = "output.txt"
+        log_file = "comsol_batch.log"
+        self._eval_count += 1
 
         # Fill in constants for any missing parameters
         provided = dict(parameters)
@@ -126,11 +152,9 @@ class COMSOLRunner:
             for p in self.parameters
         }
 
-        # Remove previous output file
-        try:
-            Path(output_file).unlink(missing_ok=True)
-        except Exception:
-            pass
+        # Archive previous output files instead of deleting
+        self._archive_file(output_file, prefix="prev_")
+        self._archive_file(log_file, prefix="prev_")
 
         logger.info(
             "Evaluating COMSOL: %s",
@@ -139,13 +163,20 @@ class COMSOLRunner:
 
         success = self._run_cli(comsol_names, comsol_values)
         if not success:
+            self._archive_file(output_file)
+            self._archive_file(log_file)
             return EvaluationResult(
                 objectives={self.objective_name: float("nan")},
                 success=False,
                 metadata={"parameters": coerced, "comsol_parameters": comsol_payload},
             )
 
-        value = parse_output_value(output_file)
+        value = parse_output_value(output_file, objective_name=self.objective_name)
+
+        # Archive output files after parsing
+        self._archive_file(output_file)
+        self._archive_file(log_file)
+
         if value is None:
             return EvaluationResult(
                 objectives={self.objective_name: float("nan")},
