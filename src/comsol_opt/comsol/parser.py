@@ -54,12 +54,7 @@ def parse_output_value(
                             objective_name, value, i + 2,
                         )
                         return value
-                logger.error(
-                    "Found objective name '%s' on line %d but no numeric "
-                    "value on the following line in %s",
-                    objective_name, i + 1, output_file,
-                )
-                return None
+                # Next line had no numeric value; keep searching further in the file
 
         logger.error(
             "Objective name '%s' not found in output file %s",
