@@ -7,9 +7,11 @@ import logging
 import torch
 from botorch.acquisition import (
     ExpectedImprovement,
+    LogExpectedImprovement,
     UpperConfidenceBound,
     qExpectedImprovement,
     qKnowledgeGradient,
+    qLogExpectedImprovement,
     qUpperConfidenceBound,
 )
 from botorch.acquisition.multi_objective import (
@@ -29,7 +31,7 @@ from torch import Tensor
 logger = logging.getLogger(__name__)
 
 # Supported acquisition function names
-SINGLE_OBJECTIVE_ACQFS = {"EI", "UCB", "qEI", "qUCB", "KG"}
+SINGLE_OBJECTIVE_ACQFS = {"EI", "logEI", "UCB", "qEI", "qLogEI", "qUCB", "KG"}
 MULTI_OBJECTIVE_ACQFS = {"EHVI", "ParEGO"}
 
 
@@ -86,12 +88,18 @@ def get_acquisition(
     if name == "EI":
         return ExpectedImprovement(model=model, best_f=best_f, maximize=maximize)
 
+    if name == "LOGEI":
+        return LogExpectedImprovement(model=model, best_f=best_f, maximize=maximize)
+
     if name == "UCB":
         # beta = 2.0 is a common default
         return UpperConfidenceBound(model=model, beta=2.0, maximize=maximize)
 
     if name == "QEI":
         return qExpectedImprovement(model=model, best_f=best_f)
+
+    if name == "QLOGEI":
+        return qLogExpectedImprovement(model=model, best_f=best_f)
 
     if name == "QUCB":
         return qUpperConfidenceBound(model=model, beta=2.0)
