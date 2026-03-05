@@ -73,6 +73,10 @@ def main() -> None:
         "--workers", type=int, default=1,
         help="Number of parallel COMSOL workers (default: 1).",
     )
+    sweep_parser.add_argument(
+        "--resume", type=Path, default=None,
+        help="Path to a previous sweep state file to resume from.",
+    )
 
     # --- analyze ---
     analyze_parser = subparsers.add_parser("analyze", help="Analyze optimization results.")
@@ -275,6 +279,22 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     X_physical: dict[str, list[float]] = {p.name: [] for p in parameters}
     success_mask: list[bool] = []
 
+    # Resume: load existing state and record which combos are already done
+    done_combos: set[tuple] = set()
+    if args.resume:
+        if not args.resume.is_file():
+            print(f"Error: resume file not found: {args.resume}", file=sys.stderr)
+            sys.exit(1)
+        existing = OptimizationState.load(args.resume)
+        X_list = existing.X.tolist() if existing.X.numel() > 0 else []
+        Y_list = existing.Y.tolist() if existing.Y.numel() > 0 else []
+        X_physical = {k: list(v) for k, v in existing.X_physical.items()}
+        success_mask = list(existing.success_mask)
+        for i in range(len(success_mask)):
+            key = tuple(round(existing.X_physical[p.name][i], 10) for p in active_params)
+            done_combos.add(key)
+        print(f"Resuming: {len(done_combos)} evaluation(s) already done, {total - len(done_combos)} remaining.")
+
     def _record(physical: dict[str, float], result) -> None:
         unit_values = []
         for p in active_params:
@@ -304,6 +324,8 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     if args.workers == 1:
         objective = _build_objective(config, parameters)
         for i, combo in enumerate(itertools.product(*param_grids), start=1):
+            if tuple(round(v, 10) for v in combo) in done_combos:
+                continue
             physical: dict[str, float] = dict(constant_defaults)
             for p, val in zip(active_params, combo):
                 physical[p.name] = val
@@ -340,6 +362,7 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             futures = {
                 executor.submit(_evaluate, combo): combo
                 for combo in itertools.product(*param_grids)
+                if tuple(round(v, 10) for v in combo) not in done_combos
             }
             for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
                 physical, result = future.result()
