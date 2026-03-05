@@ -313,11 +313,17 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             _save()
     else:
         # Each worker gets its own subdirectory so output.txt / comsol_batch.log don't collide.
+        # Distribute available cores evenly across workers so COMSOL doesn't over-subscribe.
+        import os
+        total_cores = os.cpu_count() or 1
+        cores_per_worker = max(1, total_cores // args.workers)
+        print(f"Cores per worker: {cores_per_worker} (detected {total_cores} logical cores)")
+
         runner_pool: _queue.Queue = _queue.Queue()
         for i in range(args.workers):
             wd = Path(f"sweep_worker_{i}")
             wd.mkdir(exist_ok=True)
-            runner_pool.put(_build_objective(config, parameters, working_dir=wd))
+            runner_pool.put(_build_objective(config, parameters, working_dir=wd, n_cores=cores_per_worker))
 
         def _evaluate(combo: tuple) -> tuple[dict, object]:
             phys: dict[str, float] = dict(constant_defaults)
@@ -382,6 +388,7 @@ def _build_objective(
     config: dict,
     parameters: list[OptimizationParameter],
     working_dir: Path | None = None,
+    n_cores: int | None = None,
 ) -> ObjectiveFunction:
     comsol_cfg = config.get("comsol")
     if comsol_cfg is None:
@@ -396,6 +403,7 @@ def _build_objective(
         timeout=comsol_cfg.get("timeout", 6000.0),
         objective_name=config.get("objectives", [{"name": "objective"}])[0]["name"],
         working_dir=working_dir,
+        n_cores=n_cores,
     )
 
 

@@ -52,6 +52,7 @@ class COMSOLRunner:
         timeout: float = 6000.0,
         working_dir: Path | None = None,
         objective_name: str = "objective",
+        n_cores: int | None = None,
     ) -> None:
         self.model_path = Path(model_path)
         self.comsol_exe = Path(comsol_exe)
@@ -59,6 +60,7 @@ class COMSOLRunner:
         self.timeout = float(timeout)
         self.working_dir = Path(working_dir) if working_dir else None
         self.objective_name = objective_name
+        self.n_cores = int(n_cores) if n_cores is not None else None
         self.parameters: list[OptimizationParameter] = list(parameters)
 
         if not self.comsol_exe.exists():
@@ -207,7 +209,7 @@ class COMSOLRunner:
         parameter_names: Sequence[str],
         parameter_values: Sequence[str],
     ) -> list[str]:
-        return [
+        cmd = [
             str(self.comsol_exe),
             "-inputfile",
             str(self.model_path),
@@ -221,6 +223,9 @@ class COMSOLRunner:
             "comsol_batch.log",
             "-nosave",
         ]
+        if self.n_cores is not None:
+            cmd += ["-np", str(self.n_cores)]
+        return cmd
 
     def _run_cli(
         self,
