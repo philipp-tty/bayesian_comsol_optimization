@@ -102,8 +102,9 @@ class COMSOLRunner:
         src = Path(filename)
         if not src.exists():
             return
+        base = self.working_dir if self.working_dir else Path(".")
         archive_dir = (
-            Path("comsol_output_archive")
+            base / "comsol_output_archive"
             / f"run_{self._run_id}"
             / f"iter_{self._eval_count:04d}"
         )
