@@ -69,6 +69,10 @@ def main() -> None:
         "--results", type=Path, default=None,
         help="Path to save sweep state (default: sweep_state.json).",
     )
+    sweep_parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Number of parallel COMSOL workers (default: 1).",
+    )
 
     # --- analyze ---
     analyze_parser = subparsers.add_parser("analyze", help="Analyze optimization results.")
@@ -183,8 +187,10 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
 
 def _cmd_sweep(args: argparse.Namespace) -> None:
+    import concurrent.futures
     import itertools
     import math
+    import queue as _queue
 
     import numpy as np
     import torch
@@ -194,12 +200,14 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     if args.points < 2:
         print("Error: --points must be at least 2.", file=sys.stderr)
         sys.exit(1)
+    if args.workers < 1:
+        print("Error: --workers must be at least 1.", file=sys.stderr)
+        sys.exit(1)
 
     config = _load_config(args.config)
     results_path = args.results or Path("sweep_state.json")
 
     parameters = _build_parameters(config)
-    objective = _build_objective(config, parameters)
 
     obj_cfg = config.get("objectives", [{"name": "objective", "direction": "maximize"}])
     objective_names = [o["name"] for o in obj_cfg]
@@ -238,7 +246,10 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     for g in param_grids:
         total *= len(g)
 
-    print(f"Sweep: {len(active_params)} active parameter(s), {args.points} points each.")
+    print(
+        f"Sweep: {len(active_params)} active parameter(s), "
+        f"{args.points} points each, {args.workers} worker(s)."
+    )
     for p, g in zip(active_params, param_grids):
         print(f"  {p.name}: {len(g)} points from {g[0]:.6g} to {g[-1]:.6g}"
               + (" [log]" if p.log_scale else ""))
@@ -258,43 +269,28 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
         else:
             transforms[p.name] = LinearParameterTransform(p.bounds)
 
-    # Run sweep
+    # Result accumulators (written only from the main thread)
     X_list: list[list[float]] = []
     Y_list: list[list[float]] = []
     X_physical: dict[str, list[float]] = {p.name: [] for p in parameters}
     success_mask: list[bool] = []
 
-    for i, combo in enumerate(itertools.product(*param_grids), start=1):
-        physical: dict[str, float] = dict(constant_defaults)
-        for p, val in zip(active_params, combo):
-            physical[p.name] = val
-
-        print(
-            f"[{i}/{total}] "
-            + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
-        )
-
-        result = objective.evaluate(physical)
-
-        # Convert to unit space
+    def _record(physical: dict[str, float], result) -> None:
         unit_values = []
         for p in active_params:
-            transform = transforms[p.name]
-            unit_val = float(transform.to_unit(physical[p.name]))
+            unit_val = float(transforms[p.name].to_unit(physical[p.name]))
             unit_val = max(0.0, min(1.0, unit_val))
             unit_values.append(unit_val)
-
         X_list.append(unit_values)
-        obj_values = [result.objectives.get(name, float("nan")) for name in objective_names]
-        Y_list.append(obj_values)
-
+        Y_list.append([result.objectives.get(name, float("nan")) for name in objective_names])
         for p in parameters:
-            X_physical[p.name].append(float(physical.get(p.name, constant_defaults.get(p.name, float("nan")))))
-
+            X_physical[p.name].append(
+                float(physical.get(p.name, constant_defaults.get(p.name, float("nan"))))
+            )
         success_mask.append(result.success)
 
-        # Autosave after each evaluation
-        state = OptimizationState(
+    def _save() -> None:
+        OptimizationState(
             parameters=parameters,
             objective_names=objective_names,
             X=torch.tensor(X_list, dtype=torch.double),
@@ -303,8 +299,50 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             success_mask=list(success_mask),
             metadata={"sweep_points": args.points, "sweep_total": total},
             maximize=maximize,
-        )
-        state.save(results_path)
+        ).save(results_path)
+
+    if args.workers == 1:
+        objective = _build_objective(config, parameters)
+        for i, combo in enumerate(itertools.product(*param_grids), start=1):
+            physical: dict[str, float] = dict(constant_defaults)
+            for p, val in zip(active_params, combo):
+                physical[p.name] = val
+            print(f"[{i}/{total}] " + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params))
+            result = objective.evaluate(physical)
+            _record(physical, result)
+            _save()
+    else:
+        # Each worker gets its own subdirectory so output.txt / comsol_batch.log don't collide.
+        runner_pool: _queue.Queue = _queue.Queue()
+        for i in range(args.workers):
+            wd = Path(f"sweep_worker_{i}")
+            wd.mkdir(exist_ok=True)
+            runner_pool.put(_build_objective(config, parameters, working_dir=wd))
+
+        def _evaluate(combo: tuple) -> tuple[dict, object]:
+            phys: dict[str, float] = dict(constant_defaults)
+            for p, val in zip(active_params, combo):
+                phys[p.name] = val
+            runner = runner_pool.get()
+            try:
+                res = runner.evaluate(phys)
+            finally:
+                runner_pool.put(runner)
+            return phys, res
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {
+                executor.submit(_evaluate, combo): combo
+                for combo in itertools.product(*param_grids)
+            }
+            for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                physical, result = future.result()
+                print(
+                    f"[{i}/{total}] "
+                    + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+                )
+                _record(physical, result)
+                _save()
 
     n_success = sum(success_mask)
     print(f"\nSweep complete. {n_success}/{total} evaluations succeeded.")
@@ -343,6 +381,7 @@ def _build_parameters(config: dict) -> list[OptimizationParameter]:
 def _build_objective(
     config: dict,
     parameters: list[OptimizationParameter],
+    working_dir: Path | None = None,
 ) -> ObjectiveFunction:
     comsol_cfg = config.get("comsol")
     if comsol_cfg is None:
@@ -356,6 +395,7 @@ def _build_objective(
         methodcall=comsol_cfg.get("methodcall", "methodcall2"),
         timeout=comsol_cfg.get("timeout", 6000.0),
         objective_name=config.get("objectives", [{"name": "objective"}])[0]["name"],
+        working_dir=working_dir,
     )
 
 
