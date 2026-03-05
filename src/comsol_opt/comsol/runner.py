@@ -54,7 +54,7 @@ class COMSOLRunner:
         objective_name: str = "objective",
         n_cores: int | None = None,
     ) -> None:
-        self.model_path = Path(model_path)
+        self.model_path = Path(model_path).resolve()
         self.comsol_exe = Path(comsol_exe)
         self.methodcall = methodcall
         self.timeout = float(timeout)
@@ -124,8 +124,9 @@ class COMSOLRunner:
             Physical parameter values keyed by parameter name.  Constant
             parameters may be omitted (their configured values are used).
         """
-        output_file = "output.txt"
-        log_file = "comsol_batch.log"
+        work = self.working_dir or Path(".")
+        output_file = str(work / "output.txt")
+        log_file = str(work / "comsol_batch.log")
         self._eval_count += 1
 
         # Fill in constants for any missing parameters
@@ -279,7 +280,8 @@ class COMSOLRunner:
                     logger.error("stderr: %s", stderr_data)
                 return False
 
-            if not Path("output.txt").exists():
+            work = self.working_dir or Path(".")
+            if not (work / "output.txt").exists():
                 logger.error("COMSOL did not create output.txt file")
                 return False
 
