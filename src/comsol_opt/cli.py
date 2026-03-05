@@ -52,6 +52,24 @@ def main() -> None:
         help="Path to a previous state file to resume from.",
     )
 
+    # --- sweep ---
+    sweep_parser = subparsers.add_parser(
+        "sweep",
+        help="Run a full parameter sweep without optimization.",
+    )
+    sweep_parser.add_argument(
+        "--config", type=Path, required=True,
+        help="Path to YAML configuration file.",
+    )
+    sweep_parser.add_argument(
+        "--points", type=int, required=True,
+        help="Number of equally spaced points per active parameter.",
+    )
+    sweep_parser.add_argument(
+        "--results", type=Path, default=None,
+        help="Path to save sweep state (default: sweep_state.json).",
+    )
+
     # --- analyze ---
     analyze_parser = subparsers.add_parser("analyze", help="Analyze optimization results.")
     analyze_parser.add_argument(
@@ -108,6 +126,8 @@ def main() -> None:
 
     if args.command == "run":
         _cmd_run(args)
+    elif args.command == "sweep":
+        _cmd_sweep(args)
     elif args.command == "analyze":
         _cmd_analyze(args)
 
@@ -159,6 +179,135 @@ def _cmd_run(args: argparse.Namespace) -> None:
         print("Best parameters:")
         for name, val in final_state.best_parameters.items():
             print(f"  {name}: {val:.6g}")
+    print(f"State saved to {results_path}")
+
+
+def _cmd_sweep(args: argparse.Namespace) -> None:
+    import itertools
+    import math
+
+    import numpy as np
+    import torch
+
+    from .transforms import FillFactorTransform, LinearParameterTransform
+
+    if args.points < 2:
+        print("Error: --points must be at least 2.", file=sys.stderr)
+        sys.exit(1)
+
+    config = _load_config(args.config)
+    results_path = args.results or Path("sweep_state.json")
+
+    parameters = _build_parameters(config)
+    objective = _build_objective(config, parameters)
+
+    obj_cfg = config.get("objectives", [{"name": "objective", "direction": "maximize"}])
+    objective_names = [o["name"] for o in obj_cfg]
+    maximize = [o.get("direction", "maximize") == "maximize" for o in obj_cfg]
+
+    active_params = [p for p in parameters if not p.is_constant]
+    constant_defaults = {p.name: float(p.constant_value) for p in parameters if p.is_constant}
+
+    if not active_params:
+        print("Error: no active (non-constant) parameters found in config.", file=sys.stderr)
+        sys.exit(1)
+
+    # Build per-parameter grids
+    param_grids: list[list[float]] = []
+    for p in active_params:
+        lo, hi = p.bounds
+        if p.log_scale:
+            values = np.logspace(math.log10(lo), math.log10(hi), args.points).tolist()
+        else:
+            values = np.linspace(lo, hi, args.points).tolist()
+
+        # Coerce to integer / parity constraints and deduplicate while preserving order
+        if p.is_integer:
+            seen: set[float] = set()
+            coerced_values: list[float] = []
+            for v in values:
+                cv = p.coerce_physical_value(v)
+                if cv not in seen:
+                    seen.add(cv)
+                    coerced_values.append(cv)
+            values = coerced_values
+
+        param_grids.append(values)
+
+    total = 1
+    for g in param_grids:
+        total *= len(g)
+
+    print(f"Sweep: {len(active_params)} active parameter(s), {args.points} points each.")
+    for p, g in zip(active_params, param_grids):
+        print(f"  {p.name}: {len(g)} points from {g[0]:.6g} to {g[-1]:.6g}"
+              + (" [log]" if p.log_scale else ""))
+    print(f"Total evaluations: {total}")
+
+    if total > 10_000:
+        print(
+            f"Warning: {total} evaluations is very large. "
+            "Consider reducing --points or fixing some parameters as constants.",
+        )
+
+    # Build transforms for unit-space conversion
+    transforms = {}
+    for p in active_params:
+        if p.transform == "fill_factor":
+            transforms[p.name] = FillFactorTransform(p.bounds)
+        else:
+            transforms[p.name] = LinearParameterTransform(p.bounds)
+
+    # Run sweep
+    X_list: list[list[float]] = []
+    Y_list: list[list[float]] = []
+    X_physical: dict[str, list[float]] = {p.name: [] for p in parameters}
+    success_mask: list[bool] = []
+
+    for i, combo in enumerate(itertools.product(*param_grids), start=1):
+        physical: dict[str, float] = dict(constant_defaults)
+        for p, val in zip(active_params, combo):
+            physical[p.name] = val
+
+        print(
+            f"[{i}/{total}] "
+            + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+        )
+
+        result = objective.evaluate(physical)
+
+        # Convert to unit space
+        unit_values = []
+        for p in active_params:
+            transform = transforms[p.name]
+            unit_val = float(transform.to_unit(physical[p.name]))
+            unit_val = max(0.0, min(1.0, unit_val))
+            unit_values.append(unit_val)
+
+        X_list.append(unit_values)
+        obj_values = [result.objectives.get(name, float("nan")) for name in objective_names]
+        Y_list.append(obj_values)
+
+        for p in parameters:
+            X_physical[p.name].append(float(physical.get(p.name, constant_defaults.get(p.name, float("nan")))))
+
+        success_mask.append(result.success)
+
+        # Autosave after each evaluation
+        state = OptimizationState(
+            parameters=parameters,
+            objective_names=objective_names,
+            X=torch.tensor(X_list, dtype=torch.double),
+            Y=torch.tensor(Y_list, dtype=torch.double),
+            X_physical={k: list(v) for k, v in X_physical.items()},
+            success_mask=list(success_mask),
+            metadata={"sweep_points": args.points, "sweep_total": total},
+            maximize=maximize,
+        )
+        state.save(results_path)
+
+    n_success = sum(success_mask)
+    print(f"\nSweep complete. {n_success}/{total} evaluations succeeded.")
     print(f"State saved to {results_path}")
 
 
