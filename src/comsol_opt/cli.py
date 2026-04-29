@@ -385,8 +385,21 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             f"(detected {total_cores} logical cores)"
         )
 
+    from datetime import datetime
+
+    sweep_run_dir = Path("sweep_runs") / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    sweep_run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Sweep working directory: {sweep_run_dir}")
+
     if workers == 1:
-        objective = _build_objective(config, parameters)
+        wd = sweep_run_dir / "worker_0"
+        wd.mkdir(parents=True, exist_ok=True)
+        objective = _build_objective(
+            config,
+            parameters,
+            working_dir=wd,
+            n_cores=cores_per_worker,
+        )
         for combo in _iter_pending_combos():
             physical = _physical_from_combo(combo)
             print(
@@ -401,13 +414,6 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             _record(physical, result)
             _save()
     else:
-        # Each sweep gets its own timestamped folder so prior runs aren't overwritten,
-        # and each worker gets a subdirectory so output.txt / comsol_batch.log don't collide.
-        from datetime import datetime
-
-        sweep_run_dir = Path("sweep_runs") / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        sweep_run_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Sweep working directory: {sweep_run_dir}")
         runner_pool: _queue.Queue = _queue.Queue()
         for i in range(workers):
             wd = sweep_run_dir / f"worker_{i}"
