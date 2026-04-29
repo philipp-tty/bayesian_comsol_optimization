@@ -386,98 +386,124 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
         )
 
     from datetime import datetime
+    import shutil
 
     sweep_run_dir = Path("sweep_runs") / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     sweep_run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Sweep working directory: {sweep_run_dir}")
 
-    if workers == 1:
-        wd = sweep_run_dir / "worker_0"
-        wd.mkdir(parents=True, exist_ok=True)
-        objective = _build_objective(
-            config,
-            parameters,
-            working_dir=wd,
-            n_cores=cores_per_worker,
-        )
-        for combo in _iter_pending_combos():
-            physical = _physical_from_combo(combo)
-            print(
-                f"[{len(success_mask) + 1}/{total}] "
-                + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
-            )
-            try:
-                result = objective.evaluate(physical)
-            except Exception as exc:
-                logger.exception("Sweep evaluation failed unexpectedly.")
-                result = _failure_result(exc)
-            _record(physical, result)
-            _save()
-    else:
-        runner_pool: _queue.Queue = _queue.Queue()
-        for i in range(workers):
-            wd = sweep_run_dir / f"worker_{i}"
-            wd.mkdir(parents=True, exist_ok=True)
-            runner_pool.put(
-                _build_objective(
-                    config,
-                    parameters,
-                    working_dir=wd,
-                    n_cores=cores_per_worker,
-                )
-            )
+    source_model = Path(config["comsol"]["model"]).resolve()
+    if not source_model.is_file():
+        print(f"Error: COMSOL model not found: {source_model}", file=sys.stderr)
+        sys.exit(1)
 
-        def _evaluate(combo: tuple[float, ...]) -> tuple[dict[str, float], EvaluationResult]:
-            physical = _physical_from_combo(combo)
-            runner = runner_pool.get()
+    model_copies: list[Path] = []
+
+    def _stage_worker(i: int) -> tuple[Path, Path]:
+        wd = sweep_run_dir / f"worker_{i}"
+        wd.mkdir(parents=True, exist_ok=True)
+        model_copy = wd / source_model.name
+        shutil.copy2(source_model, model_copy)
+        model_copies.append(model_copy)
+        return wd, model_copy
+
+    def _cleanup_models() -> None:
+        for path in model_copies:
             try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Failed to delete model copy %s: %s", path, exc)
+
+    try:
+        if workers == 1:
+            wd, model_copy = _stage_worker(0)
+            objective = _build_objective(
+                config,
+                parameters,
+                working_dir=wd,
+                n_cores=cores_per_worker,
+                model_path=model_copy,
+            )
+            for combo in _iter_pending_combos():
+                physical = _physical_from_combo(combo)
+                print(
+                    f"[{len(success_mask) + 1}/{total}] "
+                    + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+                )
                 try:
-                    result = runner.evaluate(physical)
+                    result = objective.evaluate(physical)
                 except Exception as exc:
                     logger.exception("Sweep evaluation failed unexpectedly.")
                     result = _failure_result(exc)
-            finally:
-                runner_pool.put(runner)
-            return physical, result
-
-        def _submit_next(
-            executor: concurrent.futures.ThreadPoolExecutor,
-            combo_iter,
-            futures: dict[concurrent.futures.Future, tuple[float, ...]],
-        ) -> bool:
-            try:
-                combo = next(combo_iter)
-            except StopIteration:
-                return False
-            futures[executor.submit(_evaluate, combo)] = combo
-            return True
-
-        combo_iter = _iter_pending_combos()
-        futures: dict[concurrent.futures.Future, tuple[float, ...]] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            for _ in range(min(workers, remaining)):
-                _submit_next(executor, combo_iter, futures)
-
-            while futures:
-                done, _ = concurrent.futures.wait(
-                    futures,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                for future in done:
-                    combo = futures.pop(future)
-                    physical = _physical_from_combo(combo)
-                    try:
-                        physical, result = future.result()
-                    except Exception as exc:
-                        logger.exception("Sweep worker future failed unexpectedly.")
-                        result = _failure_result(exc)
-                    print(
-                        f"[{len(success_mask) + 1}/{total}] "
-                        + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+                _record(physical, result)
+                _save()
+        else:
+            runner_pool: _queue.Queue = _queue.Queue()
+            for i in range(workers):
+                wd, model_copy = _stage_worker(i)
+                runner_pool.put(
+                    _build_objective(
+                        config,
+                        parameters,
+                        working_dir=wd,
+                        n_cores=cores_per_worker,
+                        model_path=model_copy,
                     )
-                    _record(physical, result)
-                    _save()
+                )
+
+            def _evaluate(combo: tuple[float, ...]) -> tuple[dict[str, float], EvaluationResult]:
+                physical = _physical_from_combo(combo)
+                runner = runner_pool.get()
+                try:
+                    try:
+                        result = runner.evaluate(physical)
+                    except Exception as exc:
+                        logger.exception("Sweep evaluation failed unexpectedly.")
+                        result = _failure_result(exc)
+                finally:
+                    runner_pool.put(runner)
+                return physical, result
+
+            def _submit_next(
+                executor: concurrent.futures.ThreadPoolExecutor,
+                combo_iter,
+                futures: dict[concurrent.futures.Future, tuple[float, ...]],
+            ) -> bool:
+                try:
+                    combo = next(combo_iter)
+                except StopIteration:
+                    return False
+                futures[executor.submit(_evaluate, combo)] = combo
+                return True
+
+            combo_iter = _iter_pending_combos()
+            futures: dict[concurrent.futures.Future, tuple[float, ...]] = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                for _ in range(min(workers, remaining)):
                     _submit_next(executor, combo_iter, futures)
+
+                while futures:
+                    done, _ = concurrent.futures.wait(
+                        futures,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        combo = futures.pop(future)
+                        physical = _physical_from_combo(combo)
+                        try:
+                            physical, result = future.result()
+                        except Exception as exc:
+                            logger.exception("Sweep worker future failed unexpectedly.")
+                            result = _failure_result(exc)
+                        print(
+                            f"[{len(success_mask) + 1}/{total}] "
+                            + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+                        )
+                        _record(physical, result)
+                        _save()
+                        _submit_next(executor, combo_iter, futures)
+    finally:
+        _cleanup_models()
 
     n_success = sum(success_mask)
     print(f"\nSweep complete. {n_success}/{total} evaluations succeeded.")
@@ -518,6 +544,7 @@ def _build_objective(
     parameters: list[OptimizationParameter],
     working_dir: Path | None = None,
     n_cores: int | None = None,
+    model_path: str | Path | None = None,
 ) -> ObjectiveFunction:
     comsol_cfg = config.get("comsol")
     if comsol_cfg is None:
@@ -525,7 +552,7 @@ def _build_objective(
             "Config must include a 'comsol' section with model and executable paths."
         )
     return COMSOLRunner(
-        model_path=comsol_cfg["model"],
+        model_path=model_path if model_path is not None else comsol_cfg["model"],
         parameters=parameters,
         comsol_exe=comsol_cfg["executable"],
         methodcall=comsol_cfg.get("methodcall", "methodcall2"),
