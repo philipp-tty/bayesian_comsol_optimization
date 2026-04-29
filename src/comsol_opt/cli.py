@@ -25,6 +25,7 @@ from .optimizer import BayesianOptimizer
 from .parameters import OptimizationParameter
 from .state import OptimizationState
 from .surrogate import GPSurrogate
+from .sweep import build_sweep_grids, combo_key
 
 logger = logging.getLogger(__name__)
 
@@ -62,20 +63,27 @@ def main() -> None:
         help="Path to YAML configuration file.",
     )
     sweep_parser.add_argument(
-        "--points", type=int, required=True,
-        help="Number of equally spaced points per active parameter.",
+        "--points", type=int, default=None,
+        help=(
+            "Number of equally spaced points for active parameters without "
+            "explicit sweep values."
+        ),
     )
     sweep_parser.add_argument(
         "--results", type=Path, default=None,
         help="Path to save sweep state (default: sweep_state.json).",
     )
     sweep_parser.add_argument(
-        "--workers", type=int, default=1,
-        help="Number of parallel COMSOL workers (default: 1).",
+        "--workers", "--instances", dest="workers", type=int, default=None,
+        help="Number of parallel COMSOL instances (default: sweep.workers or 1).",
     )
     sweep_parser.add_argument(
         "--resume", type=Path, default=None,
         help="Path to a previous sweep state file to resume from.",
+    )
+    sweep_parser.add_argument(
+        "--retry-failed", action="store_true",
+        help="When resuming, rerun previously failed sweep points.",
     )
 
     # --- analyze ---
@@ -193,22 +201,42 @@ def _cmd_run(args: argparse.Namespace) -> None:
 def _cmd_sweep(args: argparse.Namespace) -> None:
     import concurrent.futures
     import itertools
-    import math
+    import os
     import queue as _queue
+    import time
 
-    import numpy as np
     import torch
 
+    from .objective import EvaluationResult
     from .transforms import FillFactorTransform, LinearParameterTransform
 
-    if args.points < 2:
-        print("Error: --points must be at least 2.", file=sys.stderr)
-        sys.exit(1)
-    if args.workers < 1:
-        print("Error: --workers must be at least 1.", file=sys.stderr)
+    config = _load_config(args.config)
+    sweep_cfg = config.get("sweep", {}) or {}
+    if not isinstance(sweep_cfg, dict):
+        print("Error: config key 'sweep' must be a mapping.", file=sys.stderr)
         sys.exit(1)
 
-    config = _load_config(args.config)
+    workers = args.workers if args.workers is not None else sweep_cfg.get("workers", 1)
+    try:
+        workers = int(workers)
+    except (TypeError, ValueError):
+        print("Error: --workers / sweep.workers must be an integer.", file=sys.stderr)
+        sys.exit(1)
+    if workers < 1:
+        print("Error: --workers / --instances must be at least 1.", file=sys.stderr)
+        sys.exit(1)
+
+    points = args.points if args.points is not None else sweep_cfg.get("points")
+    if points is not None:
+        try:
+            points = int(points)
+        except (TypeError, ValueError):
+            print("Error: --points / sweep.points must be an integer.", file=sys.stderr)
+            sys.exit(1)
+        if points < 2:
+            print("Error: --points / sweep.points must be at least 2.", file=sys.stderr)
+            sys.exit(1)
+
     results_path = args.results or Path("sweep_state.json")
 
     parameters = _build_parameters(config)
@@ -217,34 +245,17 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     objective_names = [o["name"] for o in obj_cfg]
     maximize = [o.get("direction", "maximize") == "maximize" for o in obj_cfg]
 
-    active_params = [p for p in parameters if not p.is_constant]
     constant_defaults = {p.name: float(p.constant_value) for p in parameters if p.is_constant}
 
-    if not active_params:
-        print("Error: no active (non-constant) parameters found in config.", file=sys.stderr)
+    try:
+        active_params, param_grids, grid_sources = build_sweep_grids(
+            parameters,
+            config,
+            points=points,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    # Build per-parameter grids
-    param_grids: list[list[float]] = []
-    for p in active_params:
-        lo, hi = p.bounds
-        if p.log_scale:
-            values = np.logspace(math.log10(lo), math.log10(hi), args.points).tolist()
-        else:
-            values = np.linspace(lo, hi, args.points).tolist()
-
-        # Coerce to integer / parity constraints and deduplicate while preserving order
-        if p.is_integer:
-            seen: set[float] = set()
-            coerced_values: list[float] = []
-            for v in values:
-                cv = p.coerce_physical_value(v)
-                if cv not in seen:
-                    seen.add(cv)
-                    coerced_values.append(cv)
-            values = coerced_values
-
-        param_grids.append(values)
 
     total = 1
     for g in param_grids:
@@ -252,11 +263,19 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
 
     print(
         f"Sweep: {len(active_params)} active parameter(s), "
-        f"{args.points} points each, {args.workers} worker(s)."
+        f"{workers} COMSOL instance(s)."
     )
     for p, g in zip(active_params, param_grids):
-        print(f"  {p.name}: {len(g)} points from {g[0]:.6g} to {g[-1]:.6g}"
-              + (" [log]" if p.log_scale else ""))
+        if grid_sources[p.name] == "explicit":
+            preview = ", ".join(f"{value:.6g}" for value in g[:8])
+            if len(g) > 8:
+                preview += ", ..."
+            print(f"  {p.name}: {len(g)} explicit value(s): {preview}")
+        else:
+            print(
+                f"  {p.name}: {len(g)} generated point(s) from {g[0]:.6g} to {g[-1]:.6g}"
+                + (" [log]" if p.log_scale else "")
+            )
     print(f"Total evaluations: {total}")
 
     if total > 10_000:
@@ -278,6 +297,7 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     Y_list: list[list[float]] = []
     X_physical: dict[str, list[float]] = {p.name: [] for p in parameters}
     success_mask: list[bool] = []
+    evaluation_metadata: list[object] = []
 
     # Resume: load existing state and record which combos are already done
     done_combos: set[tuple] = set()
@@ -290,10 +310,17 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
         Y_list = existing.Y.tolist() if existing.Y.numel() > 0 else []
         X_physical = {k: list(v) for k, v in existing.X_physical.items()}
         success_mask = list(existing.success_mask)
+        raw_metadata = existing.metadata.get("evaluation_metadata", [])
+        evaluation_metadata = list(raw_metadata) if isinstance(raw_metadata, list) else []
         for i in range(len(success_mask)):
-            key = tuple(round(existing.X_physical[p.name][i], 10) for p in active_params)
+            if args.retry_failed and not success_mask[i]:
+                continue
+            key = combo_key(existing.X_physical[p.name][i] for p in active_params)
             done_combos.add(key)
-        print(f"Resuming: {len(done_combos)} evaluation(s) already done, {total - len(done_combos)} remaining.")
+        print(
+            f"Resuming: {len(done_combos)} evaluation(s) already recorded, "
+            f"{total - len(done_combos)} remaining."
+        )
 
     def _record(physical: dict[str, float], result) -> None:
         unit_values = []
@@ -308,6 +335,7 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
                 float(physical.get(p.name, constant_defaults.get(p.name, float("nan"))))
             )
         success_mask.append(result.success)
+        evaluation_metadata.append(result.metadata)
 
     def _save() -> None:
         OptimizationState(
@@ -317,61 +345,127 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             Y=torch.tensor(Y_list, dtype=torch.double),
             X_physical={k: list(v) for k, v in X_physical.items()},
             success_mask=list(success_mask),
-            metadata={"sweep_points": args.points, "sweep_total": total},
+            metadata={
+                "mode": "sweep",
+                "sweep_points": points,
+                "sweep_total": total,
+                "sweep_workers": workers,
+                "sweep_grid_sources": grid_sources,
+                "evaluation_metadata": list(evaluation_metadata),
+                "updated_timestamp": time.time(),
+            },
             maximize=maximize,
         ).save(results_path)
 
-    if args.workers == 1:
+    def _physical_from_combo(combo: tuple[float, ...]) -> dict[str, float]:
+        physical: dict[str, float] = dict(constant_defaults)
+        for p, val in zip(active_params, combo):
+            physical[p.name] = p.coerce_physical_value(val)
+        return physical
+
+    def _failure_result(error: BaseException | str) -> EvaluationResult:
+        return EvaluationResult(
+            objectives={name: float("nan") for name in objective_names},
+            success=False,
+            metadata={"error": str(error)},
+        )
+
+    def _iter_pending_combos():
+        for combo in itertools.product(*param_grids):
+            if combo_key(combo) not in done_combos:
+                yield combo
+
+    remaining = sum(1 for _ in _iter_pending_combos())
+
+    total_cores = os.cpu_count() or 1
+    cores_per_worker = max(1, total_cores // workers)
+    if workers > 1:
+        print(
+            f"Cores per COMSOL instance: {cores_per_worker} "
+            f"(detected {total_cores} logical cores)"
+        )
+
+    if workers == 1:
         objective = _build_objective(config, parameters)
-        for i, combo in enumerate(itertools.product(*param_grids), start=1):
-            if tuple(round(v, 10) for v in combo) in done_combos:
-                continue
-            physical: dict[str, float] = dict(constant_defaults)
-            for p, val in zip(active_params, combo):
-                physical[p.name] = val
-            print(f"[{i}/{total}] " + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params))
-            result = objective.evaluate(physical)
+        for combo in _iter_pending_combos():
+            physical = _physical_from_combo(combo)
+            print(
+                f"[{len(success_mask) + 1}/{total}] "
+                + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+            )
+            try:
+                result = objective.evaluate(physical)
+            except Exception as exc:
+                logger.exception("Sweep evaluation failed unexpectedly.")
+                result = _failure_result(exc)
             _record(physical, result)
             _save()
     else:
         # Each worker gets its own subdirectory so output.txt / comsol_batch.log don't collide.
-        # Distribute available cores evenly across workers so COMSOL doesn't over-subscribe.
-        import os
-        total_cores = os.cpu_count() or 1
-        cores_per_worker = max(1, total_cores // args.workers)
-        print(f"Cores per worker: {cores_per_worker} (detected {total_cores} logical cores)")
-
         runner_pool: _queue.Queue = _queue.Queue()
-        for i in range(args.workers):
+        for i in range(workers):
             wd = Path(f"sweep_worker_{i}")
             wd.mkdir(exist_ok=True)
-            runner_pool.put(_build_objective(config, parameters, working_dir=wd, n_cores=cores_per_worker))
+            runner_pool.put(
+                _build_objective(
+                    config,
+                    parameters,
+                    working_dir=wd,
+                    n_cores=cores_per_worker,
+                )
+            )
 
-        def _evaluate(combo: tuple) -> tuple[dict, object]:
-            phys: dict[str, float] = dict(constant_defaults)
-            for p, val in zip(active_params, combo):
-                phys[p.name] = val
+        def _evaluate(combo: tuple[float, ...]) -> tuple[dict[str, float], EvaluationResult]:
+            physical = _physical_from_combo(combo)
             runner = runner_pool.get()
             try:
-                res = runner.evaluate(phys)
+                try:
+                    result = runner.evaluate(physical)
+                except Exception as exc:
+                    logger.exception("Sweep evaluation failed unexpectedly.")
+                    result = _failure_result(exc)
             finally:
                 runner_pool.put(runner)
-            return phys, res
+            return physical, result
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {
-                executor.submit(_evaluate, combo): combo
-                for combo in itertools.product(*param_grids)
-                if tuple(round(v, 10) for v in combo) not in done_combos
-            }
-            for i, future in enumerate(concurrent.futures.as_completed(futures), start=1):
-                physical, result = future.result()
-                print(
-                    f"[{i}/{total}] "
-                    + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+        def _submit_next(
+            executor: concurrent.futures.ThreadPoolExecutor,
+            combo_iter,
+            futures: dict[concurrent.futures.Future, tuple[float, ...]],
+        ) -> bool:
+            try:
+                combo = next(combo_iter)
+            except StopIteration:
+                return False
+            futures[executor.submit(_evaluate, combo)] = combo
+            return True
+
+        combo_iter = _iter_pending_combos()
+        futures: dict[concurrent.futures.Future, tuple[float, ...]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for _ in range(min(workers, remaining)):
+                _submit_next(executor, combo_iter, futures)
+
+            while futures:
+                done, _ = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
                 )
-                _record(physical, result)
-                _save()
+                for future in done:
+                    combo = futures.pop(future)
+                    physical = _physical_from_combo(combo)
+                    try:
+                        physical, result = future.result()
+                    except Exception as exc:
+                        logger.exception("Sweep worker future failed unexpectedly.")
+                        result = _failure_result(exc)
+                    print(
+                        f"[{len(success_mask) + 1}/{total}] "
+                        + ", ".join(f"{p.name}={physical[p.name]:.6g}" for p in active_params)
+                    )
+                    _record(physical, result)
+                    _save()
+                    _submit_next(executor, combo_iter, futures)
 
     n_success = sum(success_mask)
     print(f"\nSweep complete. {n_success}/{total} evaluations succeeded.")

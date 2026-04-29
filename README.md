@@ -28,7 +28,7 @@ src/comsol_opt/
 ├── surrogate.py             # GP surrogate (BoTorch SingleTaskGP / ModelListGP)
 ├── acquisition.py           # Acquisition function factory + optimization
 ├── optimizer.py             # BayesianOptimizer (core optimization loop)
-├── cli.py                   # CLI entry point (run / analyze)
+├── cli.py                   # CLI entry point (run / sweep / analyze)
 ├── comsol/
 │   ├── runner.py            # COMSOLRunner (ObjectiveFunction for COMSOL)
 │   └── parser.py            # Output file parsing
@@ -199,6 +199,14 @@ optimization:
   maximize: true
   seed: 42
 
+sweep:
+  # Optional: run a full-factorial sweep without Bayesian optimization.
+  # Values may be YAML lists or compact strings with the parameter unit.
+  values:
+    leg_width: "0.5mm 1.0mm 1.5mm 2.0 mm"
+    r_load: "4ohm 8ohm"
+  workers: 2
+
 objectives:
   - name: power
     direction: maximize
@@ -226,8 +234,18 @@ Then run:
 ```bash
 comsol-opt run --config config.yaml
 comsol-opt run --config config.yaml --resume optimization_state.json
+comsol-opt sweep --config config.yaml --results sweep_state.json
+comsol-opt sweep --config config.yaml --points 4 --instances 2 --resume sweep_state.json
 comsol-opt analyze --results optimization_state.json --output-dir analysis/
 ```
+
+`sweep` evaluates every combination of the configured values and uses the
+same COMSOL runner as optimization, including `-nosave` so model files are
+not written. It checkpoints after every finished evaluation; rerun with
+`--resume sweep_state.json` after a crash. Parallel sweeps use one COMSOL
+instance per worker directory and divide detected CPU cores across instances.
+Use `--retry-failed` with `--resume` to rerun points that were saved as
+failed because of a timeout or simulation error.
 
 ## Parameter Configuration
 
