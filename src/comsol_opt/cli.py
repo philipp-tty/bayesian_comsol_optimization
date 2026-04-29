@@ -388,7 +388,7 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     from datetime import datetime
     import shutil
 
-    sweep_run_dir = Path("sweep_runs") / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    sweep_run_dir = Path(f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     sweep_run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Sweep working directory: {sweep_run_dir}")
 
@@ -400,7 +400,10 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
     model_copies: list[Path] = []
 
     def _stage_worker(i: int) -> tuple[Path, Path]:
-        wd = sweep_run_dir / f"worker_{i}"
+        # With a single worker, run inside the sweep dir directly to avoid
+        # an unnecessary nesting level. Multi-worker runs need per-worker
+        # subdirs to keep output.txt / comsol_batch.log from colliding.
+        wd = sweep_run_dir if workers == 1 else sweep_run_dir / f"worker_{i}"
         wd.mkdir(parents=True, exist_ok=True)
         model_copy = wd / source_model.name
         shutil.copy2(source_model, model_copy)
