@@ -235,8 +235,10 @@ class COMSOLRunner:
         parameter_values: Sequence[str],
     ) -> bool:
         cmd = self._build_cmd(parameter_names, parameter_values)
+        cwd = str(self.working_dir.resolve()) if self.working_dir else str(Path.cwd())
         logger.info(
-            "Running command:\n  %s",
+            "Running command (cwd=%s):\n  %s",
+            cwd,
             " ".join(f'"{c}"' if " " in c else c for c in cmd),
         )
 
@@ -246,7 +248,7 @@ class COMSOLRunner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(self.working_dir) if self.working_dir else None,
+                cwd=cwd,
             )
 
             start_time = time.monotonic()
