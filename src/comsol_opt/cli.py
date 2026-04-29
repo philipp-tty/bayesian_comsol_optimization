@@ -401,11 +401,17 @@ def _cmd_sweep(args: argparse.Namespace) -> None:
             _record(physical, result)
             _save()
     else:
-        # Each worker gets its own subdirectory so output.txt / comsol_batch.log don't collide.
+        # Each sweep gets its own timestamped folder so prior runs aren't overwritten,
+        # and each worker gets a subdirectory so output.txt / comsol_batch.log don't collide.
+        from datetime import datetime
+
+        sweep_run_dir = Path("sweep_runs") / f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        sweep_run_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Sweep working directory: {sweep_run_dir}")
         runner_pool: _queue.Queue = _queue.Queue()
         for i in range(workers):
-            wd = Path(f"sweep_worker_{i}")
-            wd.mkdir(exist_ok=True)
+            wd = sweep_run_dir / f"worker_{i}"
+            wd.mkdir(parents=True, exist_ok=True)
             runner_pool.put(
                 _build_objective(
                     config,
